@@ -56,7 +56,8 @@ node_readline_1.default.createInterface({
     input: process.stdin,
     output: process.stdout,
 });
-const octokit = new core_1.Octokit({ auth: process.env.GITHUB_TOKEN });
+const auth = core.getInput('token');
+const octokit = new core_1.Octokit({ auth });
 const tableHeader = '| Package Name | Programming Languages | Website | Version | Risk Level | Verification of Reasoning |\n|---|---|---|---|---|---|\n';
 const tableContents = [];
 /**

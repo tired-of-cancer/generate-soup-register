@@ -30,7 +30,8 @@ readline.createInterface({
   output: process.stdout,
 })
 
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN })
+const auth = core.getInput('token')
+const octokit = new Octokit({ auth })
 
 const tableHeader =
   '| Package Name | Programming Languages | Website | Version | Risk Level | Verification of Reasoning |\n|---|---|---|---|---|---|\n'

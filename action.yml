@@ -7,3 +7,7 @@ branding:
 runs:
   using: 'node16'
   main: 'dist/index.js'
+inputs:
+  token:
+    description: 'GITHUB_TOKEN or a `repo` scoped Personal Access Token (PAT)'
+    default: ${{ github.token }}
