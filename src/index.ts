@@ -9,6 +9,7 @@ import fetch from 'node-fetch'
 
 const DEFAULT_RISK_LEVEL = 'Low'
 const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer'
+const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 
 type TPackageJson = { dependencies: { [key: string]: string } }
 type TNpmData =
@@ -95,6 +96,7 @@ const generateSoupRegister = async () => {
   core.debug(`📋 Starting SOUP generation`)
 
   const path = core.getInput('path')
+  const soupPath = join(process.cwd(), path, DEFAULT_SOUP_FILENAME)
 
   const packageString = fs.readFileSync(join(path, 'package.json')).toString()
   const packageJSON = JSON.parse(packageString) as TPackageJson
@@ -106,11 +108,23 @@ const generateSoupRegister = async () => {
 
   await Promise.all(soupDataRequests)
 
+  core.debug(`✅ SOUP data retrieved`)
+
+  // Create SOUP file if it does not exist
+  try {
+    await fs.access(soupPath, fs.constants.W_OK, () => {})
+  } catch {
+    await fs.mkdir(soupPath, { recursive: true }, () => {})
+  }
+
   await fs.writeFile(
-    join(path, 'SOUP.md'),
+    soupPath,
     tableHeader + tableContents.sort().join('\n'),
-    'utf8',
-    (error) => core.setFailed(error?.message || 'failed to write to SOUP.md')
+    { encoding: 'utf8', flag: 'wx' },
+    (error) =>
+      core.setFailed(
+        error?.message || error || `failed to write to ${DEFAULT_SOUP_FILENAME}`
+      )
   )
 
   core.debug(`🏁 SOUP generation finished`)

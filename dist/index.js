@@ -51,6 +51,7 @@ const core_1 = __nccwpck_require__(6762);
 const node_fetch_1 = __importDefault(__nccwpck_require__(4429));
 const DEFAULT_RISK_LEVEL = 'Low';
 const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer';
+const DEFAULT_SOUP_FILENAME = 'SOUP.md';
 node_readline_1.default.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -99,12 +100,21 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
 const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* () {
     core.debug(`📋 Starting SOUP generation`);
     const path = core.getInput('path');
+    const soupPath = (0, node_path_1.join)(process.cwd(), path, DEFAULT_SOUP_FILENAME);
     const packageString = node_fs_1.default.readFileSync((0, node_path_1.join)(path, 'package.json')).toString();
     const packageJSON = JSON.parse(packageString);
     const soupDataRequests = [];
     Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) => soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion)));
     yield Promise.all(soupDataRequests);
-    yield node_fs_1.default.writeFile((0, node_path_1.join)(path, 'SOUP.md'), tableHeader + tableContents.sort().join('\n'), 'utf8', (error) => core.setFailed((error === null || error === void 0 ? void 0 : error.message) || 'failed to write to SOUP.md'));
+    core.debug(`✅ SOUP data retrieved`);
+    // Create SOUP file if it does not exist
+    try {
+        yield node_fs_1.default.access(soupPath, node_fs_1.default.constants.W_OK, () => { });
+    }
+    catch (_c) {
+        yield node_fs_1.default.mkdir(soupPath, { recursive: true }, () => { });
+    }
+    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, (error) => core.setFailed((error === null || error === void 0 ? void 0 : error.message) || error || `failed to write to ${DEFAULT_SOUP_FILENAME}`));
     core.debug(`🏁 SOUP generation finished`);
 });
 generateSoupRegister();
