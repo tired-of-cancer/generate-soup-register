@@ -1,0 +1,9 @@
+name: 'Generate SOUP register'
+author: 'Rik van Duijn'
+description: 'Automatically generate a SOUP register for JS based projects'
+branding:
+  icon: 'clipboard'
+  color: 'purple'
+runs:
+  using: 'node16'
+  main: 'dist/index.js'
