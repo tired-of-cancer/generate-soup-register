@@ -96,14 +96,6 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
     tableContents.push(`| ${soupName} | ${soupLanguages} | ${soupSite} | ${soupVersion} | ${DEFAULT_RISK_LEVEL} | ${DEFAULT_VERIFICATION} |`);
 });
 /**
- * Error method to pass to fs calls. Sets a failed state for the Github action runner when an error is supplied
- * @param error error object as passed by fs method on failure
- */
-const fsCallbackHandler = (error) => {
-    if (error)
-        core.setFailed(error.message);
-};
-/**
  * Main generator method: calls the other methods and combines their output in MD format and stores it in SOUP.md
  */
 const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* () {
@@ -118,17 +110,16 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) => soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion)));
     yield Promise.all(soupDataRequests);
     core.info(`✅ SOUP data retrieved`);
-    // Create SOUP file if it does not exist
-    try {
-        yield node_fs_1.default.access(soupPath, node_fs_1.default.constants.W_OK, () => { });
-        core.info(`✅ SOUP file exists`);
-    }
-    catch (_c) {
-        yield node_fs_1.default.mkdir(soupPath, { recursive: true }, fsCallbackHandler);
-        core.info(`✅ SOUP file created`);
-    }
     // Write SOUP file
-    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, fsCallbackHandler);
+    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, (error) => {
+        if (error) {
+            core.error(error);
+            core.setFailed(error);
+        }
+        else {
+            core.info(`✅ SOUP register written to ${DEFAULT_SOUP_FILENAME}`);
+        }
+    });
     core.info(`🏁 SOUP generation finished`);
 });
 generateSoupRegister();
