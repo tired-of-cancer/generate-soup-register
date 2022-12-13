@@ -90,44 +90,53 @@ const getSoupDataForPackage = async (soupName: string, soupVersion: string) => {
 }
 
 /**
+ * Error method to pass to fs calls. Sets a failed state for the Github action runner when an error is supplied
+ * @param error error object as passed by fs method on failure
+ */
+const fsCallbackHandler = (error: NodeJS.ErrnoException | null) => {
+  if (error) core.setFailed(error.message)
+}
+
+/**
  * Main generator method: calls the other methods and combines their output in MD format and stores it in SOUP.md
  */
 const generateSoupRegister = async () => {
-  core.debug(`📋 Starting SOUP generation`)
+  core.info(`📋 Starting SOUP generation`)
 
   const path = core.getInput('path')
   const soupPath = join(process.cwd(), path, DEFAULT_SOUP_FILENAME)
 
+  // Read SOUP dependencies from package json
   const packageString = fs.readFileSync(join(path, 'package.json')).toString()
   const packageJSON = JSON.parse(packageString) as TPackageJson
 
+  // Enrich SOUP data
   const soupDataRequests = <Promise<void>[]>[]
   Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) =>
     soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion))
   )
-
   await Promise.all(soupDataRequests)
 
-  core.debug(`✅ SOUP data retrieved`)
+  core.info(`✅ SOUP data retrieved`)
 
   // Create SOUP file if it does not exist
   try {
     await fs.access(soupPath, fs.constants.W_OK, () => {})
+    core.info(`✅ SOUP file exists`)
   } catch {
-    await fs.mkdir(soupPath, { recursive: true }, () => {})
+    await fs.mkdir(soupPath, { recursive: true }, fsCallbackHandler)
+    core.info(`✅ SOUP file created`)
   }
 
+  // Write SOUP file
   await fs.writeFile(
     soupPath,
     tableHeader + tableContents.sort().join('\n'),
     { encoding: 'utf8', flag: 'wx' },
-    (error) =>
-      core.setFailed(
-        error?.message || error || `failed to write to ${DEFAULT_SOUP_FILENAME}`
-      )
+    fsCallbackHandler
   )
 
-  core.debug(`🏁 SOUP generation finished`)
+  core.info(`🏁 SOUP generation finished`)
 }
 
 generateSoupRegister()

@@ -95,27 +95,40 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
     tableContents.push(`| ${soupName} | ${soupLanguages} | ${soupSite} | ${soupVersion} | ${DEFAULT_RISK_LEVEL} | ${DEFAULT_VERIFICATION} |`);
 });
 /**
+ * Error method to pass to fs calls. Sets a failed state for the Github action runner when an error is supplied
+ * @param error error object as passed by fs method on failure
+ */
+const fsCallbackHandler = (error) => {
+    if (error)
+        core.setFailed(error.message);
+};
+/**
  * Main generator method: calls the other methods and combines their output in MD format and stores it in SOUP.md
  */
 const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* () {
-    core.debug(`📋 Starting SOUP generation`);
+    core.info(`📋 Starting SOUP generation`);
     const path = core.getInput('path');
     const soupPath = (0, node_path_1.join)(process.cwd(), path, DEFAULT_SOUP_FILENAME);
+    // Read SOUP dependencies from package json
     const packageString = node_fs_1.default.readFileSync((0, node_path_1.join)(path, 'package.json')).toString();
     const packageJSON = JSON.parse(packageString);
+    // Enrich SOUP data
     const soupDataRequests = [];
     Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) => soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion)));
     yield Promise.all(soupDataRequests);
-    core.debug(`✅ SOUP data retrieved`);
+    core.info(`✅ SOUP data retrieved`);
     // Create SOUP file if it does not exist
     try {
         yield node_fs_1.default.access(soupPath, node_fs_1.default.constants.W_OK, () => { });
+        core.info(`✅ SOUP file exists`);
     }
     catch (_c) {
-        yield node_fs_1.default.mkdir(soupPath, { recursive: true }, () => { });
+        yield node_fs_1.default.mkdir(soupPath, { recursive: true }, fsCallbackHandler);
+        core.info(`✅ SOUP file created`);
     }
-    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, (error) => core.setFailed((error === null || error === void 0 ? void 0 : error.message) || error || `failed to write to ${DEFAULT_SOUP_FILENAME}`));
-    core.debug(`🏁 SOUP generation finished`);
+    // Write SOUP file
+    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, fsCallbackHandler);
+    core.info(`🏁 SOUP generation finished`);
 });
 generateSoupRegister();
 
