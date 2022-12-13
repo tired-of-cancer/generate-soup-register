@@ -1,0 +1,7 @@
+{
+  "extends": "eslint-config-toc/tsconfig-typescript.json",
+  "compilerOptions": {
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}
