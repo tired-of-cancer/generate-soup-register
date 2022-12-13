@@ -116,7 +116,7 @@ const generateSoupRegister = async () => {
   await fs.writeFile(
     soupPath,
     tableHeader + tableContents.sort().join('\n'),
-    { encoding: 'utf8', flag: 'wx' },
+    { encoding: 'utf8', flag: 'w' },
     (error) => {
       if (error) {
         core.error(error)

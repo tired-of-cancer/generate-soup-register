@@ -111,7 +111,7 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     yield Promise.all(soupDataRequests);
     core.info(`✅ SOUP data retrieved`);
     // Write SOUP file
-    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'wx' }, (error) => {
+    yield node_fs_1.default.writeFile(soupPath, tableHeader + tableContents.sort().join('\n'), { encoding: 'utf8', flag: 'w' }, (error) => {
         if (error) {
             core.error(error);
             core.setFailed(error);
