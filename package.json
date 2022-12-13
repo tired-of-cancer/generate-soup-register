@@ -2,9 +2,9 @@
   "name": "generate-soup-register",
   "version": "1.0.0",
   "description": "A GitHub Action to automatically generate a SOUP register for JS based projects",
-  "main": "dist/index.js",
+  "main": "lib/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && ncc build",
     "lint": "eslint . --fix && yarn prettier --write ."
   },
   "repository": {
@@ -25,6 +25,7 @@
   "homepage": "https://github.com/tired-of-cancer/generate-soup-register#readme",
   "devDependencies": {
     "@types/node": "^18.11.14",
+    "@vercel/ncc": "^0.36.0",
     "eslint": "^8.29.0",
     "eslint-config-toc": "^1.5.0"
   },
