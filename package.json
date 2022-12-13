@@ -15,7 +15,8 @@
     "SOUP",
     "generate",
     "compliance",
-    "medical device"
+    "medical device",
+    "actions"
   ],
   "author": "Rik van Duijn",
   "license": "MIT",
@@ -25,6 +26,7 @@
   "homepage": "https://github.com/tired-of-cancer/generate-soup-register#readme",
   "devDependencies": {
     "@types/node": "^18.11.14",
+    "@types/node-fetch": "^2.6.2",
     "@vercel/ncc": "^0.36.0",
     "eslint": "^8.29.0",
     "eslint-config-toc": "^1.5.0"
@@ -32,6 +34,7 @@
   "prettier": "eslint-config-toc/.prettierrc",
   "dependencies": {
     "@actions/core": "^1.10.0",
-    "@actions/github": "^5.1.1"
+    "@actions/github": "^5.1.1",
+    "node-fetch": "^3.3.0"
   }
 }
