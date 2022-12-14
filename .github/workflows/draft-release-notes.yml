@@ -24,6 +24,12 @@ jobs:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.TOC_BOT_PAT }}
 
+      - name: Setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version-file: '.nvmrc'
+          cache: yarn
+
       - name: Install dependencies
         run: yarn
 
