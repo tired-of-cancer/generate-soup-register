@@ -1,6 +1,6 @@
 {
   "name": "generate-soup-register",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A GitHub Action to automatically generate a SOUP register for JS based projects",
   "main": "lib/index.js",
   "scripts": {
