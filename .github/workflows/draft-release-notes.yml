@@ -1,0 +1,52 @@
+name: Draft release notes and update version
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update_release_draft_and_version:
+    permissions:
+      contents: write # to create a release draft and a commit with the version number
+      pull-requests: read # to index a list of pull requests for the release notes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Draft a new release
+        id: draft_release
+        uses: release-drafter/release-drafter@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOC_BOT_PAT }}
+
+      - name: Check out Git repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.TOC_BOT_PAT }}
+
+      - name: Install dependencies
+        run: yarn
+
+      - name: Update package version
+        uses: reedyuk/npm-version@1.1.1
+        continue-on-error: true
+        with:
+          version: ${{ steps.draft_release.outputs.tag_name }}
+          git-tag-version: 'false'
+
+      - name: Run linters
+        uses: wearerequired/lint-action@v2
+        with:
+          auto_fix: true
+          commit: false
+          eslint: true
+          prettier: true
+          github_token: ${{ secrets.TOC_BOT_PAT }}
+
+      - name: Commit version number update if changed
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: Set version to match next release draft [skip actions]
+          commit_author: ToCbot <info@untire.me>
+          commit_user_name: ToCbot
+          commit_user_email: info@untire.me
