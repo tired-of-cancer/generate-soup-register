@@ -72,18 +72,24 @@ const getSoupLanguageData = async (soupRepoUrl: string) => {
 const getSoupDataForPackage = async (soupName: string, soupVersion: string) => {
   const soupDataResponse = await fetch(`https://registry.npmjs.org/${soupName}`)
   const soupData = (await soupDataResponse.json()) as TNpmData
-  const versionSpecificSoupData =
-    soupData?.versions[soupVersion.replace(/[^\d.-]/g, '')]
 
   let soupLanguages = 'unknown'
+  let soupSite = 'private repo'
 
-  if (versionSpecificSoupData?.repository?.url?.includes('github')) {
-    soupLanguages = await getSoupLanguageData(
+  if (soupData?.versions) {
+    const versionSpecificSoupData =
+      soupData?.versions[soupVersion.replace(/[^\d.-]/g, '')]
+
+    if (versionSpecificSoupData?.repository?.url?.includes('github')) {
+      soupLanguages = await getSoupLanguageData(
+        versionSpecificSoupData.repository.url
+      )
+    }
+
+    soupSite =
+      versionSpecificSoupData?.homepage ||
       versionSpecificSoupData.repository.url
-    )
   }
-
-  const soupSite = versionSpecificSoupData?.homepage
 
   tableContents.push(
     `| ${soupName} | ${soupLanguages} | ${soupSite} | ${soupVersion} | ${DEFAULT_RISK_LEVEL} | ${DEFAULT_VERIFICATION} |`

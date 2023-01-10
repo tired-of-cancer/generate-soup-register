@@ -87,12 +87,17 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
     var _a, _b;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
-    const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replace(/[^\d.-]/g, '')];
     let soupLanguages = 'unknown';
-    if ((_b = (_a = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _a === void 0 ? void 0 : _a.url) === null || _b === void 0 ? void 0 : _b.includes('github')) {
-        soupLanguages = yield getSoupLanguageData(versionSpecificSoupData.repository.url);
+    let soupSite = 'private repo';
+    if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
+        const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replace(/[^\d.-]/g, '')];
+        if ((_b = (_a = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _a === void 0 ? void 0 : _a.url) === null || _b === void 0 ? void 0 : _b.includes('github')) {
+            soupLanguages = yield getSoupLanguageData(versionSpecificSoupData.repository.url);
+        }
+        soupSite =
+            (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
+                versionSpecificSoupData.repository.url;
     }
-    const soupSite = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage;
     tableContents.push(`| ${soupName} | ${soupLanguages} | ${soupSite} | ${soupVersion} | ${DEFAULT_RISK_LEVEL} | ${DEFAULT_VERIFICATION} |`);
 });
 /**
