@@ -1,5 +1,6 @@
 /* eslint-disable import/no-extraneous-dependencies */
 import fs from 'node:fs'
+import path = require("path")
 import { join } from 'node:path'
 import readline from 'node:readline'
 
@@ -11,19 +12,32 @@ const DEFAULT_RISK_LEVEL = 'Low'
 const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer'
 const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 
-type TPackageJson = { dependencies: { [key: string]: string } }
+type TPackageJson = {
+  name: string
+  dependencies?: { [key: string]: string }
+}
+
 type TNpmData =
   | {
-      versions: {
-        [key: string]: {
-          homepage: string
-          repository: {
-            url: string
-          }
+    versions: {
+      [key: string]: {
+        homepage: string
+        repository: {
+          url: string
         }
       }
     }
+  }
   | undefined
+
+type TSoupData = {
+  soupName: string
+  soupLanguages: string
+  soupSite: string
+  soupVersion: string
+  soupRiskLevel: string
+  soupVerification: string
+}
 
 readline.createInterface({
   input: process.stdin,
@@ -33,9 +47,6 @@ readline.createInterface({
 const auth = core.getInput('token')
 const octokit = new Octokit({ auth })
 
-const tableHeader =
-  '| Package Name | Programming Languages | Website | Version | Risk Level | Verification of Reasoning |\n|---|---|---|---|---|---|\n'
-const tableContents: string[] = []
 
 /**
  * Method to request programming language data from GitHub so we can list the language of the SOUP
@@ -52,8 +63,8 @@ const getSoupLanguageData = async (soupRepoUrl: string) => {
   if (soupLanguagesGitHubResponse.status !== 200) return 'unknown'
   const soupLanguagesData = soupLanguagesGitHubResponse.data
 
-  const totalSoupBytes = Object.values(soupLanguagesData).reduce(
-    (a: number, b: number) => a + b
+  const totalSoupBytes = Object.values(soupLanguagesData)?.reduce(
+    (a: number, b: number) => a + b, 0
   )
 
   return Object.keys(soupLanguagesData)
@@ -69,7 +80,7 @@ const getSoupLanguageData = async (soupRepoUrl: string) => {
  * @param soupName string: name of the SOUP as listed in our package file
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  */
-const getSoupDataForPackage = async (soupName: string, soupVersion: string) => {
+const getSoupDataForPackage = async (soupName: string, soupVersion: string): Promise<TSoupData> => {
   const soupDataResponse = await fetch(`https://registry.npmjs.org/${soupName}`)
   const soupData = (await soupDataResponse.json()) as TNpmData
 
@@ -88,12 +99,47 @@ const getSoupDataForPackage = async (soupName: string, soupVersion: string) => {
 
     soupSite =
       versionSpecificSoupData?.homepage ||
-      versionSpecificSoupData.repository.url
+      versionSpecificSoupData?.repository?.url || 'unknown'
   }
 
-  tableContents.push(
-    `| ${soupName} | ${soupLanguages} | ${soupSite} | ${soupVersion} | ${DEFAULT_RISK_LEVEL} | ${DEFAULT_VERIFICATION} |`
-  )
+  return {
+    soupName,
+    soupLanguages,
+    soupSite,
+    soupVersion,
+    soupRiskLevel: DEFAULT_RISK_LEVEL,
+    soupVerification: DEFAULT_VERIFICATION,
+  }
+}
+
+
+const generateSoupTable = (soupData: TSoupData[]) => {
+  const tableHeader =
+    '| Package Name | Programming Languages | Website | Version | Risk Level | Verification of Reasoning |\n|---|---|---|---|---|---|\n'
+  const tableContents: string[] = []
+  soupData.forEach(data => {
+    tableContents.push(
+      `| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupVerification} |`
+    )
+  })
+  return tableHeader + tableContents.sort().join('\n')
+}
+
+const findFilesRecursive = (directory: string, searchFile: string, resultArray: string[]) => {
+  fs.readdirSync(directory).forEach((file: string) => {
+    const subpath = path.join(directory, file)
+    if (fs.lstatSync(subpath).isDirectory()) {
+      // Skip node_modules folder
+      if (subpath.indexOf('node_modules') > -1) return
+      // don't try to find package.json files in folders like .git or .github 
+      if (subpath.indexOf('/.') > -1) return
+      findFilesRecursive(subpath, searchFile, resultArray)
+    } else {
+      if (file === searchFile) {
+        resultArray.push(directory + '/' + file)
+      }
+    }
+  })
 }
 
 /**
@@ -103,25 +149,43 @@ const generateSoupRegister = async () => {
   core.info(`📋 Starting SOUP generation`)
 
   const path = core.getInput('path')
-  const soupPath = join(process.cwd(), path, DEFAULT_SOUP_FILENAME)
+  const rootPath = join(process.cwd(), path)
+  const soupPath = join(rootPath, DEFAULT_SOUP_FILENAME)
+
+  // get array of package.json paths
+  const packageJSONPaths: string[] = []
+  findFilesRecursive(rootPath, 'package.json', packageJSONPaths)
 
   // Read SOUP dependencies from package json
-  const packageString = fs.readFileSync(join(path, 'package.json')).toString()
-  const packageJSON = JSON.parse(packageString) as TPackageJson
+  const packageJSONs = packageJSONPaths.map(packageJSONPath => {
+    const packageString = fs.readFileSync(packageJSONPath).toString()
+    const packageJSON = JSON.parse(packageString) as TPackageJson
+    return packageJSON
+    // filter out package.json files without dependencies
+  }).filter(packageJSON => !!packageJSON.dependencies)
 
-  // Enrich SOUP data
-  const soupDataRequests = <Promise<void>[]>[]
-  Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) =>
-    soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion))
-  )
-  await Promise.all(soupDataRequests)
+
+  let soupRegister = ''
+  for (const packageJSON of packageJSONs) {
+    const soupDataRequests = <Promise<TSoupData>[]>[]
+    packageJSON.dependencies && Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) =>
+      soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion))
+    )
+    const soupData = await Promise.all(soupDataRequests)
+
+    const header = `## ${packageJSON.name}\n\n`
+    const table = generateSoupTable(soupData)
+
+    soupRegister = soupRegister + header + table + "\n\n"
+  }
+
 
   core.info(`✅ SOUP data retrieved`)
 
   // Write SOUP file
   await fs.writeFile(
     soupPath,
-    tableHeader + tableContents.sort().join('\n'),
+    soupRegister,
     { encoding: 'utf8', flag: 'w' },
     (error) => {
       if (error) {
