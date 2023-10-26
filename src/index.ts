@@ -65,7 +65,7 @@ const getSoupLanguageData = async (soupRepoUrl: string) => {
   const totalSoupBytes = Object.values(soupLanguagesData)?.reduce(
     (a: number, b: number) => a + b,
     0
-  )
+  ) ?? 0
 
   return Object.keys(soupLanguagesData)
     .filter(
