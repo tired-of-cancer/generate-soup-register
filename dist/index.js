@@ -90,7 +90,7 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
     let soupLanguages = 'unknown';
     let soupSite = 'private repo';
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
-        const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replace(/[^\d.-]/g, '')];
+        const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
         if ((_d = (_c = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _c === void 0 ? void 0 : _c.url) === null || _d === void 0 ? void 0 : _d.includes('github')) {
             soupLanguages = yield getSoupLanguageData(versionSpecificSoupData.repository.url);
         }
