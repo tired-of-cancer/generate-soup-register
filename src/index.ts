@@ -14,15 +14,15 @@ const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 type TPackageJson = { dependencies: { [key: string]: string } }
 type TNpmData =
   | {
-      versions: {
-        [key: string]: {
-          homepage: string
-          repository: {
-            url: string
-          }
+    versions: {
+      [key: string]: {
+        homepage: string
+        repository: {
+          url: string
         }
       }
     }
+  }
   | undefined
 
 readline.createInterface({
