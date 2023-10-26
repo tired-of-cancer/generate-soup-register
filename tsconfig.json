@@ -1,6 +1,7 @@
 {
   "extends": "eslint-config-toc/tsconfig-typescript.json",
   "compilerOptions": {
+    "lib": ["ES2021.String"],
     "outDir": "lib"
   },
   "include": ["src/**/*.ts"]
