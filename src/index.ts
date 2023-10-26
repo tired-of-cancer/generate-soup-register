@@ -19,15 +19,15 @@ type TPackageJson = {
 
 type TNpmData =
   | {
-      versions: {
-        [key: string]: {
-          homepage: string
-          repository: {
-            url: string
-          }
+    versions: {
+      [key: string]: {
+        homepage: string
+        repository: {
+          url: string
         }
       }
     }
+  }
   | undefined
 
 type TSoupData = {
@@ -93,7 +93,7 @@ const getSoupDataForPackage = async (
 
   if (soupData?.versions) {
     const versionSpecificSoupData =
-      soupData?.versions[soupVersion.replaceAll(/[^\d.-]/g, '')]
+      soupData?.versions[soupVersion.replace(/[^\d.-]/g, '')]
 
     if (versionSpecificSoupData?.repository?.url?.includes('github')) {
       soupLanguages = await getSoupLanguageData(
