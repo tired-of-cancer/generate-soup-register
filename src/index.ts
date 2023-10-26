@@ -62,10 +62,11 @@ const getSoupLanguageData = async (soupRepoUrl: string) => {
   if (soupLanguagesGitHubResponse.status !== 200) return 'unknown'
   const soupLanguagesData = soupLanguagesGitHubResponse.data
 
-  const totalSoupBytes = Object.values(soupLanguagesData)?.reduce(
-    (a: number, b: number) => a + b,
-    0
-  ) ?? 0
+  const totalSoupBytes =
+    Object.values(soupLanguagesData)?.reduce(
+      (a: number, b: number) => a + b,
+      0
+    ) ?? 0
 
   return Object.keys(soupLanguagesData)
     .filter(
@@ -92,7 +93,7 @@ const getSoupDataForPackage = async (
 
   if (soupData?.versions) {
     const versionSpecificSoupData =
-      soupData?.versions[soupVersion.replace(/[^\d.-]/g, '')]
+      soupData?.versions[soupVersion.replaceAll(/[^\d.-]/g, '')]
 
     if (versionSpecificSoupData?.repository?.url?.includes('github')) {
       soupLanguages = await getSoupLanguageData(
