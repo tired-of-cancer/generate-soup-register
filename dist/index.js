@@ -59,7 +59,7 @@ node_readline_1.default.createInterface({
     output: process.stdout,
 });
 const auth = core.getInput('token');
-const octokit = new core_1.Octokit({ auth });
+const octokit = new core_1.Octokit({ auth, request: { fetch: node_fetch_1.default } });
 /**
  * Method to request programming language data from GitHub so we can list the language of the SOUP
  * @param soupRepoUrl string: github repo url retrieved from NPM info

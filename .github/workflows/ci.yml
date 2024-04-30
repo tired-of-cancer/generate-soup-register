@@ -29,3 +29,6 @@ jobs:
           eslint: true
           prettier: true
           continue_on_error: false
+
+      - name: Generate SOUP register
+        run: node dist/index.js
