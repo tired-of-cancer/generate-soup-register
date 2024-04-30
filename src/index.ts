@@ -7,6 +7,7 @@ import readline from 'node:readline'
 import * as core from '@actions/core'
 import { Octokit } from '@octokit/core'
 import fetch from 'node-fetch'
+import parseGithubUrl from 'parse-github-url'
 
 const DEFAULT_RISK_LEVEL = 'Low'
 const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer'
@@ -53,20 +54,22 @@ const octokit = new Octokit({ auth })
  * @returns string: comma separated languages that make up at least 10% of the project
  */
 const getSoupLanguageData = async (soupRepoUrl: string) => {
-  const soupRepoUriParts = soupRepoUrl.replace('.git', '').split('/').reverse()
+  const { owner, name } = parseGithubUrl(soupRepoUrl) ?? {}
+  if (!owner || !name) return 'unknown'
+
   const soupLanguagesGitHubResponse = await octokit.request(
-    'GET /repos/{owner}/{repo}/languages',
-    { owner: soupRepoUriParts[1], repo: soupRepoUriParts[0] }
+    'GET /repos/{owner}/{name}/languages',
+    { owner, name }
   )
 
   if (soupLanguagesGitHubResponse.status !== 200) return 'unknown'
-  const soupLanguagesData = soupLanguagesGitHubResponse.data
+  const soupLanguagesData = soupLanguagesGitHubResponse.data as Record<
+    string,
+    number
+  >
 
   const totalSoupBytes =
-    Object.values(soupLanguagesData)?.reduce(
-      (a: number, b: number) => a + b,
-      0
-    ) ?? 0
+    Object.values(soupLanguagesData)?.reduce((a, b) => a + b, 0) ?? 0
 
   return Object.keys(soupLanguagesData)
     .filter(
