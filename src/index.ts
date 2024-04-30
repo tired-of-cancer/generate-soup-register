@@ -46,7 +46,7 @@ readline.createInterface({
 })
 
 const auth = core.getInput('token')
-const octokit = new Octokit({ auth })
+const octokit = new Octokit({ auth, request: { fetch } })
 
 /**
  * Method to request programming language data from GitHub so we can list the language of the SOUP
