@@ -30,7 +30,7 @@
     "@types/node-fetch": "2.6.7",
     "@types/parse-github-url": "1.0.3",
     "@vercel/ncc": "0.38.1",
-    "eslint": "8.52.0",
+    "eslint": "9.2.0",
     "eslint-config-toc": "1.8.1"
   },
   "prettier": "eslint-config-toc/.prettierrc",
