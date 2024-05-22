@@ -182,6 +182,38 @@ const getSoupDataForPackageCollection = async (packageJSON: TPackageJson) => {
 }
 
 /**
+ * Method to generate a list of unique dependencies from a list of package.json contents.
+ * @param packageJSONs TPackageJson[]: the contents of one or more package JSON to generate a unique list of names
+ */
+const getUniqueDependencies = (packageJSONs: TPackageJson[]) => {
+  const dependencies = new Set<string>()
+
+  packageJSONs.forEach((packageJSON) => {
+    if (packageJSON.dependencies) {
+      Object.keys(packageJSON.dependencies).forEach((dependency) =>
+        dependencies.add(dependency)
+      )
+    }
+  })
+
+  return [...dependencies]
+}
+
+/**
+ * Method to generate a header and intro for the SOUP register
+ * @param packageJSONs TPackageJson[]: the contents of one or more package JSON to generate a unique list of names
+ */
+const generateSoupHeader = (packageJSONs: TPackageJson[]) => {
+  const header = `# SOUP Register`
+
+  const dependenciesCount = getUniqueDependencies(packageJSONs).length
+
+  const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team. The SOUP dependencies are listed below, along with their programming languages, website, version, risk level, and verification of reasoning.\n\nThe repository uses a total of ${dependenciesCount} unique SOUP dependencies.`
+
+  return `${header}\n\n${intro}\n\n`
+}
+
+/**
  * Main generator method: calls the other methods and combines their output in MD format and stores it in SOUP.md
  */
 const generateSoupRegister = async () => {
@@ -213,7 +245,9 @@ const generateSoupRegister = async () => {
 
   const soupData = await Promise.all(repositorySoupRequests)
 
-  const soupRegister = soupData.join('\n\n')
+  const soupHeader = generateSoupHeader(packageJSONs)
+
+  const soupRegister = soupHeader + soupData.join('\n\n')
 
   core.info(`✅ SOUP data retrieved`)
 

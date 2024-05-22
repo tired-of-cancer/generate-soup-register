@@ -1,3 +1,9 @@
+# SOUP Register
+
+This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team. The SOUP dependencies are listed below, along with their programming languages, website, version, risk level, and verification of reasoning.
+
+The repository uses a total of 4 unique SOUP dependencies.
+
 ## generate-soup-register
 
 | Package Name     | Programming Languages | Website                                                      | Version | Risk Level | Verification of Reasoning               |
