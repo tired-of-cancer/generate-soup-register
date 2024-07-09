@@ -54,29 +54,33 @@ const octokit = new Octokit({ auth, request: { fetch } })
  * @returns string: comma separated languages that make up at least 10% of the project
  */
 const getSoupLanguageData = async (soupRepoUrl: string) => {
-  const { owner, name } = parseGithubUrl(soupRepoUrl) ?? {}
-  if (!owner || !name) return 'unknown'
+  try {
+    const { owner, name } = parseGithubUrl(soupRepoUrl) ?? {}
+    if (!owner || !name) return 'unknown'
 
-  const soupLanguagesGitHubResponse = await octokit.request(
-    'GET /repos/{owner}/{name}/languages',
-    { owner, name }
-  )
-
-  if (soupLanguagesGitHubResponse.status !== 200) return 'unknown'
-  const soupLanguagesData = soupLanguagesGitHubResponse.data as Record<
-    string,
-    number
-  >
-
-  const totalSoupBytes =
-    Object.values(soupLanguagesData)?.reduce((a, b) => a + b, 0) ?? 0
-
-  return Object.keys(soupLanguagesData)
-    .filter(
-      // By filtering out languages that make up less than 10% we prevent listing unrelevant tool languages etc.
-      (language) => soupLanguagesData[language] > totalSoupBytes * 0.1
+    const soupLanguagesGitHubResponse = await octokit.request(
+      'GET /repos/{owner}/{name}/languages',
+      { owner, name }
     )
-    .join(', ')
+
+    if (soupLanguagesGitHubResponse.status !== 200) return 'unknown'
+    const soupLanguagesData = soupLanguagesGitHubResponse.data as Record<
+      string,
+      number
+    >
+
+    const totalSoupBytes =
+      Object.values(soupLanguagesData)?.reduce((a, b) => a + b, 0) ?? 0
+
+    return Object.keys(soupLanguagesData)
+      .filter(
+        // By filtering out languages that make up less than 10% we prevent listing unrelevant tool languages etc.
+        (language) => soupLanguagesData[language] > totalSoupBytes * 0.1
+      )
+      .join(', ')
+  } catch {
+    return 'unknown'
+  }
 }
 
 /**

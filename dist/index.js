@@ -67,19 +67,24 @@ const octokit = new core_1.Octokit({ auth, request: { fetch: node_fetch_1.defaul
  */
 const getSoupLanguageData = (soupRepoUrl) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c;
-    const { owner, name } = (_a = (0, parse_github_url_1.default)(soupRepoUrl)) !== null && _a !== void 0 ? _a : {};
-    if (!owner || !name)
+    try {
+        const { owner, name } = (_a = (0, parse_github_url_1.default)(soupRepoUrl)) !== null && _a !== void 0 ? _a : {};
+        if (!owner || !name)
+            return 'unknown';
+        const soupLanguagesGitHubResponse = yield octokit.request('GET /repos/{owner}/{name}/languages', { owner, name });
+        if (soupLanguagesGitHubResponse.status !== 200)
+            return 'unknown';
+        const soupLanguagesData = soupLanguagesGitHubResponse.data;
+        const totalSoupBytes = (_c = (_b = Object.values(soupLanguagesData)) === null || _b === void 0 ? void 0 : _b.reduce((a, b) => a + b, 0)) !== null && _c !== void 0 ? _c : 0;
+        return Object.keys(soupLanguagesData)
+            .filter(
+        // By filtering out languages that make up less than 10% we prevent listing unrelevant tool languages etc.
+        (language) => soupLanguagesData[language] > totalSoupBytes * 0.1)
+            .join(', ');
+    }
+    catch (_d) {
         return 'unknown';
-    const soupLanguagesGitHubResponse = yield octokit.request('GET /repos/{owner}/{name}/languages', { owner, name });
-    if (soupLanguagesGitHubResponse.status !== 200)
-        return 'unknown';
-    const soupLanguagesData = soupLanguagesGitHubResponse.data;
-    const totalSoupBytes = (_c = (_b = Object.values(soupLanguagesData)) === null || _b === void 0 ? void 0 : _b.reduce((a, b) => a + b, 0)) !== null && _c !== void 0 ? _c : 0;
-    return Object.keys(soupLanguagesData)
-        .filter(
-    // By filtering out languages that make up less than 10% we prevent listing unrelevant tool languages etc.
-    (language) => soupLanguagesData[language] > totalSoupBytes * 0.1)
-        .join(', ');
+    }
 });
 /**
  * Method to request SOUP package information from NPM
@@ -87,19 +92,19 @@ const getSoupLanguageData = (soupRepoUrl) => __awaiter(void 0, void 0, void 0, f
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  */
 const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 0, void 0, function* () {
-    var _d, _e, _f;
+    var _e, _f, _g;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
     let soupLanguages = 'unknown';
     let soupSite = 'private repo';
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
         const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
-        if ((_e = (_d = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _d === void 0 ? void 0 : _d.url) === null || _e === void 0 ? void 0 : _e.includes('github')) {
+        if ((_f = (_e = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _e === void 0 ? void 0 : _e.url) === null || _f === void 0 ? void 0 : _f.includes('github')) {
             soupLanguages = yield getSoupLanguageData(versionSpecificSoupData.repository.url);
         }
         soupSite =
             (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
-                ((_f = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _f === void 0 ? void 0 : _f.url) ||
+                ((_g = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _g === void 0 ? void 0 : _g.url) ||
                 'unknown';
     }
     return {
