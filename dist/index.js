@@ -51,7 +51,6 @@ const core = __importStar(__nccwpck_require__(2186));
 const core_1 = __nccwpck_require__(6762);
 const node_fetch_1 = __importDefault(__nccwpck_require__(4429));
 const parse_github_url_1 = __importDefault(__nccwpck_require__(7233));
-const DEFAULT_RISK_LEVEL = 'Low';
 const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer';
 const DEFAULT_SOUP_FILENAME = 'SOUP.md';
 node_readline_1.default.createInterface({
@@ -87,32 +86,203 @@ const getSoupLanguageData = (soupRepoUrl) => __awaiter(void 0, void 0, void 0, f
     }
 });
 /**
+ * Check if package is deprecated via NPM registry data
+ */
+const checkDeprecation = (npmData, version) => {
+    if (!(npmData === null || npmData === void 0 ? void 0 : npmData.versions))
+        return undefined;
+    const cleanVersion = version.replaceAll(/[^\d.-]/g, '');
+    const versionData = npmData.versions[cleanVersion];
+    if (versionData === null || versionData === void 0 ? void 0 : versionData.deprecated) {
+        return `Deprecated: ${versionData.deprecated}`;
+    }
+    return undefined;
+};
+/**
+ * Check if package is abandoned (no updates in >2 years)
+ */
+const checkAbandonment = (npmData) => {
+    var _a;
+    if (!((_a = npmData === null || npmData === void 0 ? void 0 : npmData.time) === null || _a === void 0 ? void 0 : _a.modified))
+        return undefined;
+    const lastModified = new Date(npmData.time.modified);
+    const twoYearsAgo = new Date();
+    twoYearsAgo.setFullYear(twoYearsAgo.getFullYear() - 2);
+    if (lastModified < twoYearsAgo) {
+        const years = Math.floor((Date.now() - lastModified.getTime()) / (365 * 24 * 60 * 60 * 1000));
+        return `Abandoned: No updates in ${years} years`;
+    }
+    return undefined;
+};
+/**
+ * Query OSV API for known vulnerabilities
+ */
+const checkVulnerabilities = (packageName, version) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const cleanVersion = version.replaceAll(/[^\d.-]/g, '');
+        const response = yield (0, node_fetch_1.default)('https://api.osv.dev/v1/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                package: { name: packageName, ecosystem: 'npm' },
+                version: cleanVersion,
+            }),
+        });
+        if (!response.ok)
+            return undefined;
+        const data = (yield response.json());
+        if (data.vulns && data.vulns.length > 0) {
+            const vulnIds = data.vulns
+                .slice(0, 3)
+                .map((v) => v.id)
+                .join(', ');
+            const suffix = data.vulns.length > 3 ? ` (+${data.vulns.length - 3} more)` : '';
+            return `Vulnerabilities: ${vulnIds}${suffix}`;
+        }
+        return undefined;
+    }
+    catch (_e) {
+        return undefined;
+    }
+});
+/**
+ * Check GitHub repo status (archived, last push date)
+ */
+const checkGitHubRepoStatus = (repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
+    var _f;
+    try {
+        const { owner, name } = (_f = (0, parse_github_url_1.default)(repoUrl)) !== null && _f !== void 0 ? _f : {};
+        if (!owner || !name)
+            return { archived: undefined, lowMaintenance: undefined };
+        const response = yield octokit.request('GET /repos/{owner}/{name}', {
+            owner,
+            name,
+        });
+        if (response.status !== 200)
+            return { archived: undefined, lowMaintenance: undefined };
+        const data = response.data;
+        const result = {
+            archived: undefined,
+            lowMaintenance: undefined,
+        };
+        if (data.archived) {
+            result.archived = 'Repository archived';
+        }
+        if (data.pushed_at) {
+            const lastPush = new Date(data.pushed_at);
+            const oneYearAgo = new Date();
+            oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+            if (lastPush < oneYearAgo) {
+                const months = Math.floor((Date.now() - lastPush.getTime()) / (30 * 24 * 60 * 60 * 1000));
+                result.lowMaintenance = `Low maintenance: No commits in ${months} months`;
+            }
+        }
+        return result;
+    }
+    catch (_g) {
+        return { archived: undefined, lowMaintenance: undefined };
+    }
+});
+/**
+ * Check for open security advisories on GitHub
+ */
+const checkSecurityAdvisories = (repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
+    var _h;
+    try {
+        const { owner, name } = (_h = (0, parse_github_url_1.default)(repoUrl)) !== null && _h !== void 0 ? _h : {};
+        if (!owner || !name)
+            return undefined;
+        const response = yield octokit.request('GET /repos/{owner}/{name}/security-advisories', {
+            owner,
+            name,
+            state: 'published',
+        });
+        if (response.status !== 200)
+            return undefined;
+        const advisories = response.data;
+        if (advisories && advisories.length > 0) {
+            return `Security advisories: ${advisories.length} open`;
+        }
+        return undefined;
+    }
+    catch (_j) {
+        return undefined;
+    }
+});
+/**
+ * Perform all risk checks and calculate overall risk level
+ */
+const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
+    const reasons = [];
+    const deprecation = checkDeprecation(npmData, version);
+    const abandonment = checkAbandonment(npmData);
+    const [vulnResult, repoStatus, advisoriesResult] = yield Promise.all([
+        checkVulnerabilities(packageName, version),
+        repoUrl
+            ? checkGitHubRepoStatus(repoUrl)
+            : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
+        repoUrl ? checkSecurityAdvisories(repoUrl) : Promise.resolve(undefined),
+    ]);
+    if (deprecation)
+        reasons.push(deprecation);
+    if (abandonment)
+        reasons.push(abandonment);
+    if (vulnResult)
+        reasons.push(vulnResult);
+    if (repoStatus.archived)
+        reasons.push(repoStatus.archived);
+    if (repoStatus.lowMaintenance)
+        reasons.push(repoStatus.lowMaintenance);
+    if (advisoriesResult)
+        reasons.push(advisoriesResult);
+    let level = 'Low';
+    if (deprecation || vulnResult || repoStatus.archived) {
+        level = 'Critical';
+    }
+    else if (abandonment || advisoriesResult) {
+        level = 'High';
+    }
+    else if (repoStatus.lowMaintenance) {
+        level = 'Medium';
+    }
+    return {
+        level,
+        reasons: reasons.length > 0 ? reasons : ['Passed all automated checks'],
+    };
+});
+/**
  * Method to request SOUP package information from NPM
  * @param soupName string: name of the SOUP as listed in our package file
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  */
 const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 0, void 0, function* () {
-    var _e, _f, _g;
+    var _k, _l;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
     let soupLanguages = 'unknown';
     let soupSite = 'private repo';
+    let repoUrl;
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
         const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
-        if ((_f = (_e = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _e === void 0 ? void 0 : _e.url) === null || _f === void 0 ? void 0 : _f.includes('github')) {
-            soupLanguages = yield getSoupLanguageData(versionSpecificSoupData.repository.url);
+        if ((_k = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _k === void 0 ? void 0 : _k.url) {
+            repoUrl = versionSpecificSoupData.repository.url;
+            if (repoUrl.includes('github')) {
+                soupLanguages = yield getSoupLanguageData(repoUrl);
+            }
         }
         soupSite =
             (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
-                ((_g = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _g === void 0 ? void 0 : _g.url) ||
+                ((_l = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _l === void 0 ? void 0 : _l.url) ||
                 'unknown';
     }
+    const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl);
     return {
         soupName,
         soupLanguages,
         soupSite,
         soupVersion,
-        soupRiskLevel: DEFAULT_RISK_LEVEL,
+        soupRiskLevel: riskAnalysis.level,
+        soupRiskDetails: riskAnalysis.reasons.join('; '),
         soupVerification: DEFAULT_VERIFICATION,
     };
 });
@@ -121,10 +291,10 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
  * @param soupData TSoupData: the data generated by the other methods
  */
 const generateSoupTable = (soupData) => {
-    const tableHeader = '| Package Name | Programming Languages | Website | Version | Risk Level | Verification of Reasoning |\n|---|---|---|---|---|---|\n';
+    const tableHeader = '| Package Name | Programming Languages | Website | Version | Risk Level | Risk Details | Verification |\n|---|---|---|---|---|---|---|\n';
     const tableContents = [];
     soupData.forEach((data) => {
-        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupVerification} |`);
+        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${data.soupVerification} |`);
     });
     return tableHeader + tableContents.sort().join('\n');
 };
@@ -187,7 +357,15 @@ const getUniqueDependencies = (packageJSONs) => {
 const generateSoupHeader = (packageJSONs) => {
     const header = `# SOUP Register`;
     const dependenciesCount = getUniqueDependencies(packageJSONs).length;
-    const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team. The SOUP dependencies are listed below, along with their programming languages, website, version, risk level, and verification of reasoning.\n\nThe repository uses a total of ${dependenciesCount} unique SOUP dependencies.`;
+    const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team.
+
+Risk levels are automatically calculated based on:
+- **Critical**: Package is deprecated, has known vulnerabilities, or repository is archived
+- **High**: Package is abandoned (>2 years without updates) or has open security advisories
+- **Medium**: Low maintenance activity (>1 year without commits)
+- **Low**: Passed all automated checks
+
+The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`;
     return `${header}\n\n${intro}\n\n`;
 };
 /**

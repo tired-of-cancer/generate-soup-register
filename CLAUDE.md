@@ -33,6 +33,7 @@ yarn soup
 - `findFilesRecursive()` - Recursively finds package.json files, skipping node_modules
 
 **Data flow:**
+
 1. Find all `package.json` files recursively
 2. For each dependency, fetch from `https://registry.npmjs.org/{package}`
 3. Parse GitHub repo URL from NPM data, fetch languages via Octokit
@@ -40,6 +41,7 @@ yarn soup
 5. Generate markdown table with columns: Name, Languages, Website, Version, Risk Level, Verification
 
 **Build output:**
+
 - `lib/` - TypeScript compiled output
 - `dist/` - NCC-bundled single file for GitHub Actions (this is what `action.yml` references)
 
