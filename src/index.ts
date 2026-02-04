@@ -8,6 +8,7 @@ import * as core from '@actions/core'
 import { Octokit } from '@octokit/core'
 import fetch from 'node-fetch'
 import parseGithubUrl from 'parse-github-url'
+import { coerce, satisfies } from 'semver'
 
 const DEFAULT_VERIFICATION_LOW = 'SOUP analysed and accepted by developer'
 const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed'
@@ -61,8 +62,28 @@ type TRiskAnalysis = {
   reasons: string[]
 }
 
+type TOsvVulnerability = {
+  id: string
+  summary?: string
+  affected?: Array<{
+    package?: {
+      ecosystem?: string
+      name?: string
+    }
+    ranges?: Array<{
+      type: 'SEMVER' | 'ECOSYSTEM' | 'GIT'
+      events: Array<{
+        introduced?: string
+        fixed?: string
+        last_affected?: string
+      }>
+    }>
+    versions?: string[]
+  }>
+}
+
 type TOsvResponse = {
-  vulns?: Array<{ id: string; summary?: string }>
+  vulns?: TOsvVulnerability[]
 }
 
 type TGitHubRepoData = {
@@ -158,7 +179,80 @@ const checkAbandonment = (npmData: TNpmData): string | undefined => {
 }
 
 /**
- * Query OSV API for known vulnerabilities
+ * Check if a version matches a single OSV range
+ */
+const checkOsvRange = (
+  normalizedVersion: string,
+  range: NonNullable<TOsvVulnerability['affected']>[0]['ranges'] extends
+    | (infer R)[]
+    | undefined
+    ? R
+    : never
+): boolean => {
+  if (range.type !== 'SEMVER' && range.type !== 'ECOSYSTEM') {
+    // Can't check GIT ranges, assume affected
+    return true
+  }
+
+  // Extract introduced and fixed from events
+  const introduced = range.events.find((event) => event.introduced)?.introduced
+  const fixed = range.events.find((event) => event.fixed)?.fixed
+
+  // Normalize "0" to "0.0.0"
+  const normalizedIntroduced = introduced === '0' ? '0.0.0' : introduced
+
+  // Build range string and check
+  if (normalizedIntroduced && fixed) {
+    const rangeString = `>=${normalizedIntroduced} <${fixed}`
+    try {
+      return satisfies(normalizedVersion, rangeString)
+    } catch {
+      return true // Invalid range, assume affected
+    }
+  }
+  if (normalizedIntroduced && !fixed) {
+    // No fix available, all versions >= introduced are affected
+    const rangeString = `>=${normalizedIntroduced}`
+    try {
+      return satisfies(normalizedVersion, rangeString)
+    } catch {
+      return true
+    }
+  }
+  return false
+}
+
+const isVersionAffected = (
+  vuln: TOsvVulnerability,
+  version: string
+): boolean => {
+  // Normalize version for semver comparison
+  const normalizedVersion = coerce(version)?.version
+  if (!normalizedVersion) return true // If we can't parse, assume affected (safe default)
+
+  // If no affected info, assume affected
+  if (!vuln.affected || vuln.affected.length === 0) return true
+
+  // Check each affected entry using .some()
+  return vuln.affected.some((affected) => {
+    // Check explicit version list first
+    if (affected.versions?.includes(version)) {
+      return true
+    }
+
+    // Check version ranges
+    if (affected.ranges) {
+      return affected.ranges.some((range) =>
+        checkOsvRange(normalizedVersion, range)
+      )
+    }
+
+    return false
+  })
+}
+
+/**
+ * Query OSV API for known vulnerabilities affecting the specific version
  */
 const checkVulnerabilities = async (
   packageName: string,
@@ -186,13 +280,22 @@ const checkVulnerabilities = async (
 
     const data = (await response.json()) as TOsvResponse
     if (data.vulns && data.vulns.length > 0) {
-      const vulnLinks = data.vulns
-        .slice(0, 3)
-        .map((v) => `[${v.id}](https://osv.dev/vulnerability/${v.id})`)
-        .join(', ')
-      const suffix =
-        data.vulns.length > 3 ? ` (+${data.vulns.length - 3} more)` : ''
-      return `Vulnerabilities: ${vulnLinks}${suffix}`
+      // Filter to only vulnerabilities that actually affect this version
+      const affectingVulns = data.vulns.filter((vuln) =>
+        isVersionAffected(vuln, cleanVersion)
+      )
+
+      if (affectingVulns.length > 0) {
+        const vulnLinks = affectingVulns
+          .slice(0, 3)
+          .map((v) => `[${v.id}](https://osv.dev/vulnerability/${v.id})`)
+          .join(', ')
+        const suffix =
+          affectingVulns.length > 3
+            ? ` (+${affectingVulns.length - 3} more)`
+            : ''
+        return `Vulnerabilities: ${vulnLinks}${suffix}`
+      }
     }
     return undefined
   } catch (error) {
@@ -291,12 +394,48 @@ const checkGitHubRepoStatus = async (
 }
 
 /**
- * Check for open security advisories on GitHub
+ * Check if a version is affected by a GitHub advisory's vulnerable_version_range
+ * GitHub format: ">= 5.16.0, <= 5.19.0" or "< 1.2.3" etc.
+ */
+const isVersionAffectedByAdvisory = (
+  version: string,
+  vulnerableRange: string | undefined
+): boolean => {
+  if (!vulnerableRange) return true // No range specified, assume affected
+
+  const normalizedVersion = coerce(version)?.version
+  if (!normalizedVersion) return true // Can't parse, assume affected
+
+  try {
+    // Convert GitHub format to semver format
+    // GitHub uses ", " to separate conditions, semver uses " "
+    const semverRange = vulnerableRange.replaceAll(/,\s*/g, ' ')
+    return satisfies(normalizedVersion, semverRange)
+  } catch {
+    // Invalid range, assume affected
+    return true
+  }
+}
+
+type TGitHubAdvisory = {
+  ghsa_id: string
+  vulnerabilities?: Array<{
+    package?: {
+      ecosystem?: string
+      name?: string
+    }
+    vulnerable_version_range?: string
+  }>
+}
+
+/**
+ * Check for open security advisories on GitHub that affect the specific version
  * Returns advisory info, or undefined if none found, or special "unverifiable" string for 404s
  */
 const checkSecurityAdvisories = async (
   repoUrl: string,
-  packageName: string
+  packageName: string,
+  version: string
 ): Promise<{
   advisories: string | undefined
   unverifiable: string | undefined
@@ -305,6 +444,8 @@ const checkSecurityAdvisories = async (
     const { owner, name } = parseGithubUrl(repoUrl) ?? {}
     if (!owner || !name)
       return { advisories: undefined, unverifiable: undefined }
+
+    const cleanVersion = version.replaceAll(/[^\d.-]/g, '')
 
     const response = await octokit.request(
       'GET /repos/{owner}/{name}/security-advisories',
@@ -324,19 +465,48 @@ const checkSecurityAdvisories = async (
       return { advisories: undefined, unverifiable: undefined }
     }
 
-    const advisories = response.data as Array<{ ghsa_id: string }>
+    const advisories = response.data as TGitHubAdvisory[]
     if (advisories && advisories.length > 0) {
-      const advisoryLinks = advisories
-        .slice(0, 3)
-        .map(
-          (a) => `[${a.ghsa_id}](https://github.com/advisories/${a.ghsa_id})`
-        )
-        .join(', ')
-      const suffix =
-        advisories.length > 3 ? ` (+${advisories.length - 3} more)` : ''
-      return {
-        advisories: `Advisories: ${advisoryLinks}${suffix}`,
-        unverifiable: undefined,
+      // Filter to only advisories that affect our version
+      const affectingAdvisories = advisories.filter((advisory) => {
+        // If no vulnerabilities info, assume affected
+        if (
+          !advisory.vulnerabilities ||
+          advisory.vulnerabilities.length === 0
+        ) {
+          return true
+        }
+
+        // Check if any vulnerability in this advisory affects our package and version
+        return advisory.vulnerabilities.some((vuln) => {
+          // Check if this vulnerability is for npm ecosystem
+          if (vuln.package?.ecosystem && vuln.package.ecosystem !== 'npm') {
+            return false
+          }
+
+          // Check version range
+          return isVersionAffectedByAdvisory(
+            cleanVersion,
+            vuln.vulnerable_version_range
+          )
+        })
+      })
+
+      if (affectingAdvisories.length > 0) {
+        const advisoryLinks = affectingAdvisories
+          .slice(0, 3)
+          .map(
+            (a) => `[${a.ghsa_id}](https://github.com/advisories/${a.ghsa_id})`
+          )
+          .join(', ')
+        const suffix =
+          affectingAdvisories.length > 3
+            ? ` (+${affectingAdvisories.length - 3} more)`
+            : ''
+        return {
+          advisories: `Advisories: ${advisoryLinks}${suffix}`,
+          unverifiable: undefined,
+        }
       }
     }
     return { advisories: undefined, unverifiable: undefined }
@@ -379,7 +549,7 @@ const analyzeRisk = async (
           unverifiable: undefined,
         }),
     repoUrl
-      ? checkSecurityAdvisories(repoUrl, packageName)
+      ? checkSecurityAdvisories(repoUrl, packageName, version)
       : Promise.resolve({ advisories: undefined, unverifiable: undefined }),
   ])
 
