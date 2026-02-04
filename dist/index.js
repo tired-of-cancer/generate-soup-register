@@ -51,8 +51,11 @@ const core = __importStar(__nccwpck_require__(2186));
 const core_1 = __nccwpck_require__(6762);
 const node_fetch_1 = __importDefault(__nccwpck_require__(4429));
 const parse_github_url_1 = __importDefault(__nccwpck_require__(7233));
-const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer';
+const DEFAULT_VERIFICATION_LOW = 'SOUP analysed and accepted by developer';
+const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed';
 const DEFAULT_SOUP_FILENAME = 'SOUP.md';
+// Store for existing verification values parsed from SOUP.md
+let existingVerifications = new Map();
 node_readline_1.default.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -256,6 +259,21 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
     };
 });
 /**
+ * Determine the verification text for a package based on risk level and existing values
+ * @param packageName string: name of the package
+ * @param riskLevel string: calculated risk level
+ */
+const getVerification = (packageName, riskLevel) => {
+    // If there's a custom verification, preserve it
+    const existing = existingVerifications.get(packageName);
+    if (existing)
+        return existing;
+    // Otherwise, set based on risk level
+    return riskLevel === 'Low'
+        ? DEFAULT_VERIFICATION_LOW
+        : DEFAULT_VERIFICATION_RISK;
+};
+/**
  * Method to request SOUP package information from NPM
  * @param soupName string: name of the SOUP as listed in our package file
  * @param soupVersion string: version of the SOUP as listed in our lockfile
@@ -288,7 +306,7 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
         soupVersion,
         soupRiskLevel: riskAnalysis.level,
         soupRiskDetails: riskAnalysis.reasons.join('; '),
-        soupVerification: DEFAULT_VERIFICATION,
+        soupVerification: getVerification(soupName, riskAnalysis.level),
     };
 });
 /**
@@ -356,6 +374,46 @@ const getUniqueDependencies = (packageJSONs) => {
     return [...dependencies];
 };
 /**
+ * Parse existing SOUP.md to extract verification values for each package.
+ * This allows preserving custom verification text across regenerations.
+ * @param soupPath string: path to the existing SOUP.md file
+ */
+const parseExistingVerifications = (soupPath) => {
+    existingVerifications = new Map();
+    if (!node_fs_1.default.existsSync(soupPath))
+        return;
+    try {
+        const content = node_fs_1.default.readFileSync(soupPath, 'utf8');
+        const lines = content.split('\n');
+        // Filter to table data rows and extract verifications
+        lines
+            .filter((line) => line.startsWith('|') && !line.includes('---'))
+            .forEach((line) => {
+            const cells = line
+                .split('|')
+                .map((cell) => cell.trim())
+                .filter((cell) => cell.length > 0);
+            // Table has 7 columns: Name, Languages, Website, Version, Risk Level, Risk Details, Verification
+            if (cells.length >= 7) {
+                const packageName = cells[0];
+                const verification = cells[6];
+                // Only store non-default verifications (custom entries)
+                if (verification &&
+                    verification !== DEFAULT_VERIFICATION_LOW &&
+                    verification !== DEFAULT_VERIFICATION_RISK) {
+                    existingVerifications.set(packageName, verification);
+                }
+            }
+        });
+        if (existingVerifications.size > 0) {
+            core.info(`📝 Preserved ${existingVerifications.size} custom verification entries`);
+        }
+    }
+    catch (_a) {
+        // If parsing fails, continue with empty map
+    }
+};
+/**
  * Method to generate a header and intro for the SOUP register
  * @param packageJSONs TPackageJson[]: the contents of one or more package JSON to generate a unique list of names
  */
@@ -381,6 +439,8 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     const basePath = core.getInput('path');
     const rootPath = (0, node_path_1.join)(process.cwd(), basePath);
     const soupPath = (0, node_path_1.join)(rootPath, DEFAULT_SOUP_FILENAME);
+    // Parse existing SOUP.md to preserve custom verifications
+    parseExistingVerifications(soupPath);
     // get array of package.json paths
     const packageJSONPaths = [];
     findFilesRecursive(rootPath, packageJSONPaths);

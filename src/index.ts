@@ -9,8 +9,12 @@ import { Octokit } from '@octokit/core'
 import fetch from 'node-fetch'
 import parseGithubUrl from 'parse-github-url'
 
-const DEFAULT_VERIFICATION = 'SOUP analysed and accepted by developer'
+const DEFAULT_VERIFICATION_LOW = 'SOUP analysed and accepted by developer'
+const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed'
 const DEFAULT_SOUP_FILENAME = 'SOUP.md'
+
+// Store for existing verification values parsed from SOUP.md
+let existingVerifications: Map<string, string> = new Map()
 
 type TPackageJson = {
   name: string
@@ -313,6 +317,22 @@ const analyzeRisk = async (
 }
 
 /**
+ * Determine the verification text for a package based on risk level and existing values
+ * @param packageName string: name of the package
+ * @param riskLevel string: calculated risk level
+ */
+const getVerification = (packageName: string, riskLevel: string): string => {
+  // If there's a custom verification, preserve it
+  const existing = existingVerifications.get(packageName)
+  if (existing) return existing
+
+  // Otherwise, set based on risk level
+  return riskLevel === 'Low'
+    ? DEFAULT_VERIFICATION_LOW
+    : DEFAULT_VERIFICATION_RISK
+}
+
+/**
  * Method to request SOUP package information from NPM
  * @param soupName string: name of the SOUP as listed in our package file
  * @param soupVersion string: version of the SOUP as listed in our lockfile
@@ -360,7 +380,7 @@ const getSoupDataForPackage = async (
     soupVersion,
     soupRiskLevel: riskAnalysis.level,
     soupRiskDetails: riskAnalysis.reasons.join('; '),
-    soupVerification: DEFAULT_VERIFICATION,
+    soupVerification: getVerification(soupName, riskAnalysis.level),
   }
 }
 
@@ -444,6 +464,55 @@ const getUniqueDependencies = (packageJSONs: TPackageJson[]) => {
 }
 
 /**
+ * Parse existing SOUP.md to extract verification values for each package.
+ * This allows preserving custom verification text across regenerations.
+ * @param soupPath string: path to the existing SOUP.md file
+ */
+const parseExistingVerifications = (soupPath: string) => {
+  existingVerifications = new Map()
+
+  if (!fs.existsSync(soupPath)) return
+
+  try {
+    const content = fs.readFileSync(soupPath, 'utf8')
+    const lines = content.split('\n')
+
+    // Filter to table data rows and extract verifications
+    lines
+      .filter((line) => line.startsWith('|') && !line.includes('---'))
+      .forEach((line) => {
+        const cells = line
+          .split('|')
+          .map((cell) => cell.trim())
+          .filter((cell) => cell.length > 0)
+
+        // Table has 7 columns: Name, Languages, Website, Version, Risk Level, Risk Details, Verification
+        if (cells.length >= 7) {
+          const packageName = cells[0]
+          const verification = cells[6]
+
+          // Only store non-default verifications (custom entries)
+          if (
+            verification &&
+            verification !== DEFAULT_VERIFICATION_LOW &&
+            verification !== DEFAULT_VERIFICATION_RISK
+          ) {
+            existingVerifications.set(packageName, verification)
+          }
+        }
+      })
+
+    if (existingVerifications.size > 0) {
+      core.info(
+        `📝 Preserved ${existingVerifications.size} custom verification entries`
+      )
+    }
+  } catch {
+    // If parsing fails, continue with empty map
+  }
+}
+
+/**
  * Method to generate a header and intro for the SOUP register
  * @param packageJSONs TPackageJson[]: the contents of one or more package JSON to generate a unique list of names
  */
@@ -474,6 +543,9 @@ const generateSoupRegister = async () => {
   const basePath = core.getInput('path')
   const rootPath = join(process.cwd(), basePath)
   const soupPath = join(rootPath, DEFAULT_SOUP_FILENAME)
+
+  // Parse existing SOUP.md to preserve custom verifications
+  parseExistingVerifications(soupPath)
 
   // get array of package.json paths
   const packageJSONPaths: string[] = []
