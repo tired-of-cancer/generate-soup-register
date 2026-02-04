@@ -8,14 +8,19 @@ import * as core from '@actions/core'
 import { Octokit } from '@octokit/core'
 import fetch from 'node-fetch'
 import parseGithubUrl from 'parse-github-url'
-import { coerce, satisfies } from 'semver'
+import { coerce, compare, major, minor, prerelease, satisfies } from 'semver'
 
 const DEFAULT_VERIFICATION_LOW = 'SOUP analysed and accepted by developer'
 const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed'
 const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 
 // Store for existing verification values parsed from SOUP.md
-let existingVerifications: Map<string, string> = new Map()
+// Includes version to detect when re-assessment is needed after updates
+type TExistingVerification = {
+  version: string
+  verification: string
+}
+let existingVerifications: Map<string, TExistingVerification> = new Map()
 
 // Track API failures to halt execution if any occur
 const apiFailures: string[] = []
@@ -176,6 +181,79 @@ const checkAbandonment = (npmData: TNpmData): string | undefined => {
     return `Abandoned: No updates in ${years} years`
   }
   return undefined
+}
+
+/**
+ * Check version lag against latest available version
+ * Returns risk reason if significantly behind:
+ * - >1 minor version behind (same major) → Medium risk
+ * - 1 major version behind → Medium risk
+ * - 2+ major versions behind → High risk
+ */
+const checkVersionLag = (
+  npmData: TNpmData,
+  installedVersion: string
+): { reason: string | undefined; severity: 'high' | 'medium' | undefined } => {
+  if (!npmData?.versions) return { reason: undefined, severity: undefined }
+
+  // Get all stable versions (exclude prereleases and deprecated versions)
+  const allVersions = Object.keys(npmData.versions)
+    .filter((v) => {
+      const coerced = coerce(v)
+      const isDeprecated = npmData.versions[v]?.deprecated
+      return coerced && !prerelease(v) && !isDeprecated
+    })
+    .sort((a, b) => {
+      const coercedA = coerce(a)
+      const coercedB = coerce(b)
+      if (!coercedA || !coercedB) return 0
+      return compare(coercedA, coercedB)
+    })
+
+  if (allVersions.length === 0)
+    return { reason: undefined, severity: undefined }
+
+  const latestVersion = allVersions.at(-1)
+  if (!latestVersion) return { reason: undefined, severity: undefined }
+
+  const installedCoerced = coerce(installedVersion)
+  const latestCoerced = coerce(latestVersion)
+
+  if (!installedCoerced || !latestCoerced)
+    return { reason: undefined, severity: undefined }
+
+  const installedMajor = major(installedCoerced)
+  const latestMajor = major(latestCoerced)
+  const installedMinor = minor(installedCoerced)
+  const latestMinor = minor(latestCoerced)
+
+  const majorsBehind = latestMajor - installedMajor
+
+  if (majorsBehind >= 2) {
+    return {
+      reason: `Version lag: ${majorsBehind} major versions behind (${installedCoerced.version} → ${latestCoerced.version})`,
+      severity: 'high',
+    }
+  }
+
+  if (majorsBehind === 1) {
+    return {
+      reason: `Version lag: 1 major version behind (${installedCoerced.version} → ${latestCoerced.version})`,
+      severity: 'medium',
+    }
+  }
+
+  // Same major version - check minor version lag
+  const minorsBehind = latestMinor - installedMinor
+
+  if (minorsBehind > 1) {
+    return {
+      reason: `Version lag: ${minorsBehind} minor versions behind (${installedCoerced.version} → ${latestCoerced.version})`,
+      severity: 'medium',
+    }
+  }
+
+  return { reason: undefined, severity: undefined }
 }
 
 /**
@@ -538,6 +616,7 @@ const analyzeRisk = async (
 
   const deprecation = checkDeprecation(npmData, version)
   const abandonment = checkAbandonment(npmData)
+  const versionLag = checkVersionLag(npmData, version)
 
   const [vulnResult, repoStatus, advisoriesResult] = await Promise.all([
     checkVulnerabilities(packageName, version),
@@ -555,6 +634,7 @@ const analyzeRisk = async (
 
   if (deprecation) reasons.push(deprecation)
   if (abandonment) reasons.push(abandonment)
+  if (versionLag.reason) reasons.push(versionLag.reason)
   if (vulnResult) reasons.push(vulnResult)
   if (repoStatus.archived) reasons.push(repoStatus.archived)
   if (repoStatus.lowMaintenance) reasons.push(repoStatus.lowMaintenance)
@@ -573,9 +653,17 @@ const analyzeRisk = async (
 
   if (deprecation || vulnResult || repoStatus.archived) {
     level = 'Critical'
-  } else if (abandonment || advisoriesResult.advisories) {
+  } else if (
+    abandonment ||
+    advisoriesResult.advisories ||
+    versionLag.severity === 'high'
+  ) {
     level = 'High'
-  } else if (repoStatus.lowMaintenance || hasUnverifiable) {
+  } else if (
+    repoStatus.lowMaintenance ||
+    hasUnverifiable ||
+    versionLag.severity === 'medium'
+  ) {
     // Unverifiable packages get Medium risk - need developer review
     level = 'Medium'
   }
@@ -589,14 +677,35 @@ const analyzeRisk = async (
 /**
  * Determine the verification text for a package based on risk level and existing values
  * @param packageName string: name of the package
+ * @param currentVersion string: current version being analyzed
  * @param riskLevel string: calculated risk level
  */
-const getVerification = (packageName: string, riskLevel: string): string => {
-  // If there's a custom verification, preserve it
+const getVerification = (
+  packageName: string,
+  currentVersion: string,
+  riskLevel: string
+): string => {
   const existing = existingVerifications.get(packageName)
-  if (existing) return existing
 
-  // Otherwise, set based on risk level
+  if (existing) {
+    // Check if version changed since last verification
+    const normalizedCurrent = coerce(currentVersion)?.version
+    const normalizedExisting = coerce(existing.version)?.version
+
+    if (
+      normalizedCurrent &&
+      normalizedExisting &&
+      normalizedCurrent !== normalizedExisting
+    ) {
+      // Version changed - flag for re-assessment
+      return `⚠️ Version changed (${normalizedExisting} → ${normalizedCurrent}), re-assess needed. Previous note: ${existing.verification}`
+    }
+
+    // Version unchanged, preserve custom verification
+    return existing.verification
+  }
+
+  // No existing verification, set based on risk level
   return riskLevel === 'Low'
     ? DEFAULT_VERIFICATION_LOW
     : DEFAULT_VERIFICATION_RISK
@@ -650,7 +759,11 @@ const getSoupDataForPackage = async (
     soupVersion,
     soupRiskLevel: riskAnalysis.level,
     soupRiskDetails: riskAnalysis.reasons.join('; '),
-    soupVerification: getVerification(soupName, riskAnalysis.level),
+    soupVerification: getVerification(
+      soupName,
+      soupVersion,
+      riskAnalysis.level
+    ),
   }
 }
 
@@ -765,15 +878,18 @@ const parseExistingVerifications = (soupPath: string) => {
         // Table has 7 columns: Name, Languages, Website, Version, Risk Level, Risk Details, Verification
         if (cells.length >= 7) {
           const packageName = cells[0]
+          const version = cells[3]
           const verification = cells[6]
 
           // Only store non-default verifications (custom entries)
+          // Also exclude entries that are already flagged for re-assessment (they start with "⚠️ Version changed")
           if (
             verification &&
             verification !== DEFAULT_VERIFICATION_LOW &&
-            verification !== DEFAULT_VERIFICATION_RISK
+            verification !== DEFAULT_VERIFICATION_RISK &&
+            !verification.startsWith('⚠️ Version changed')
           ) {
-            existingVerifications.set(packageName, verification)
+            existingVerifications.set(packageName, { version, verification })
           }
         }
       })
@@ -801,8 +917,8 @@ const generateSoupHeader = (packageJSONs: TPackageJson[]) => {
 
 Risk levels are automatically calculated based on:
 - **Critical**: Package is deprecated, has known vulnerabilities, or repository is archived
-- **High**: Package is abandoned (>2 years without updates) or has open security advisories
-- **Medium**: Low maintenance activity (>1 year without commits)
+- **High**: Package is abandoned (>2 years without updates), has open security advisories, or is 2+ major versions behind latest
+- **Medium**: Low maintenance activity (>1 year without commits), 1 major version behind, or >1 minor versions behind
 - **Low**: Passed all automated checks
 
 The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`
