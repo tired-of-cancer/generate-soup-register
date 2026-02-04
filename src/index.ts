@@ -748,8 +748,14 @@ const parseExistingVerifications = (soupPath: string) => {
     const lines = content.split('\n')
 
     // Filter to table data rows and extract verifications
+    // Skip separator rows (---) and header row (Package Name)
     lines
-      .filter((line) => line.startsWith('|') && !line.includes('---'))
+      .filter(
+        (line) =>
+          line.startsWith('|') &&
+          !line.includes('---') &&
+          !line.includes('Package Name')
+      )
       .forEach((line) => {
         const cells = line
           .split('|')
