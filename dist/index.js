@@ -509,24 +509,37 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
  * @param currentVersion string: current version being analyzed
  * @param riskLevel string: calculated risk level
  */
-const getVerification = (packageName, currentVersion, riskLevel) => {
+const getVerification = (packageName, currentVersion, currentRiskLevel, currentRiskDetails) => {
     var _a, _b;
     const existing = existingVerifications.get(packageName);
     if (existing) {
-        // Check if version changed since last verification
+        const changes = [];
+        // Check if version changed
         const normalizedCurrent = (_a = (0, semver_1.coerce)(currentVersion)) === null || _a === void 0 ? void 0 : _a.version;
         const normalizedExisting = (_b = (0, semver_1.coerce)(existing.version)) === null || _b === void 0 ? void 0 : _b.version;
         if (normalizedCurrent &&
             normalizedExisting &&
             normalizedCurrent !== normalizedExisting) {
-            // Version changed - flag for re-assessment
-            return `⚠️ Version changed (${normalizedExisting} → ${normalizedCurrent}), re-assess needed. Previous note: ${existing.verification}`;
+            changes.push(`version ${normalizedExisting} → ${normalizedCurrent}`);
         }
-        // Version unchanged, preserve custom verification
+        // Check if risk level changed
+        if (currentRiskLevel !== existing.riskLevel) {
+            changes.push(`risk ${existing.riskLevel} → ${currentRiskLevel}`);
+        }
+        // Check if risk details changed (new issues found)
+        if (currentRiskDetails !== existing.riskDetails) {
+            changes.push('risk details changed');
+        }
+        if (changes.length > 0) {
+            // Something changed - flag for re-assessment
+            const changesSummary = changes.join(', ');
+            return `⚠️ Re-assess needed (${changesSummary}). Previous note: ${existing.verification}`;
+        }
+        // Nothing changed, preserve custom verification
         return existing.verification;
     }
     // No existing verification, set based on risk level
-    return riskLevel === 'Low'
+    return currentRiskLevel === 'Low'
         ? DEFAULT_VERIFICATION_LOW
         : DEFAULT_VERIFICATION_RISK;
 };
@@ -563,7 +576,7 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
         soupVersion,
         soupRiskLevel: riskAnalysis.level,
         soupRiskDetails: riskAnalysis.reasons.join('; '),
-        soupVerification: getVerification(soupName, soupVersion, riskAnalysis.level),
+        soupVerification: getVerification(soupName, soupVersion, riskAnalysis.level, riskAnalysis.reasons.join('; ')),
     };
 });
 /**
@@ -657,14 +670,21 @@ const parseExistingVerifications = (soupPath) => {
             if (cells.length >= 7) {
                 const packageName = cells[0];
                 const version = cells[3];
+                const riskLevel = cells[4];
+                const riskDetails = cells[5];
                 const verification = cells[6];
                 // Only store non-default verifications (custom entries)
-                // Also exclude entries that are already flagged for re-assessment (they start with "⚠️ Version changed")
+                // Also exclude entries that are already flagged for re-assessment
                 if (verification &&
                     verification !== DEFAULT_VERIFICATION_LOW &&
                     verification !== DEFAULT_VERIFICATION_RISK &&
-                    !verification.startsWith('⚠️ Version changed')) {
-                    existingVerifications.set(packageName, { version, verification });
+                    !verification.startsWith('⚠️ Re-assess')) {
+                    existingVerifications.set(packageName, {
+                        version,
+                        riskLevel,
+                        riskDetails,
+                        verification,
+                    });
                 }
             }
         });

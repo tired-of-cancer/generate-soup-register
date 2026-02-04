@@ -15,9 +15,11 @@ const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed'
 const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 
 // Store for existing verification values parsed from SOUP.md
-// Includes version to detect when re-assessment is needed after updates
+// Includes version, risk level, and risk details to detect when re-assessment is needed
 type TExistingVerification = {
   version: string
+  riskLevel: string
+  riskDetails: string
   verification: string
 }
 let existingVerifications: Map<string, TExistingVerification> = new Map()
@@ -683,30 +685,47 @@ const analyzeRisk = async (
 const getVerification = (
   packageName: string,
   currentVersion: string,
-  riskLevel: string
+  currentRiskLevel: string,
+  currentRiskDetails: string
 ): string => {
   const existing = existingVerifications.get(packageName)
 
   if (existing) {
-    // Check if version changed since last verification
+    const changes: string[] = []
+
+    // Check if version changed
     const normalizedCurrent = coerce(currentVersion)?.version
     const normalizedExisting = coerce(existing.version)?.version
-
     if (
       normalizedCurrent &&
       normalizedExisting &&
       normalizedCurrent !== normalizedExisting
     ) {
-      // Version changed - flag for re-assessment
-      return `⚠️ Version changed (${normalizedExisting} → ${normalizedCurrent}), re-assess needed. Previous note: ${existing.verification}`
+      changes.push(`version ${normalizedExisting} → ${normalizedCurrent}`)
     }
 
-    // Version unchanged, preserve custom verification
+    // Check if risk level changed
+    if (currentRiskLevel !== existing.riskLevel) {
+      changes.push(`risk ${existing.riskLevel} → ${currentRiskLevel}`)
+    }
+
+    // Check if risk details changed (new issues found)
+    if (currentRiskDetails !== existing.riskDetails) {
+      changes.push('risk details changed')
+    }
+
+    if (changes.length > 0) {
+      // Something changed - flag for re-assessment
+      const changesSummary = changes.join(', ')
+      return `⚠️ Re-assess needed (${changesSummary}). Previous note: ${existing.verification}`
+    }
+
+    // Nothing changed, preserve custom verification
     return existing.verification
   }
 
   // No existing verification, set based on risk level
-  return riskLevel === 'Low'
+  return currentRiskLevel === 'Low'
     ? DEFAULT_VERIFICATION_LOW
     : DEFAULT_VERIFICATION_RISK
 }
@@ -762,7 +781,8 @@ const getSoupDataForPackage = async (
     soupVerification: getVerification(
       soupName,
       soupVersion,
-      riskAnalysis.level
+      riskAnalysis.level,
+      riskAnalysis.reasons.join('; ')
     ),
   }
 }
@@ -879,17 +899,24 @@ const parseExistingVerifications = (soupPath: string) => {
         if (cells.length >= 7) {
           const packageName = cells[0]
           const version = cells[3]
+          const riskLevel = cells[4]
+          const riskDetails = cells[5]
           const verification = cells[6]
 
           // Only store non-default verifications (custom entries)
-          // Also exclude entries that are already flagged for re-assessment (they start with "⚠️ Version changed")
+          // Also exclude entries that are already flagged for re-assessment
           if (
             verification &&
             verification !== DEFAULT_VERIFICATION_LOW &&
             verification !== DEFAULT_VERIFICATION_RISK &&
-            !verification.startsWith('⚠️ Version changed')
+            !verification.startsWith('⚠️ Re-assess')
           ) {
-            existingVerifications.set(packageName, { version, verification })
+            existingVerifications.set(packageName, {
+              version,
+              riskLevel,
+              riskDetails,
+              verification,
+            })
           }
         }
       })
