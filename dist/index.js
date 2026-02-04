@@ -166,19 +166,20 @@ const checkGitHubRepoStatus = (repoUrl, packageName) => __awaiter(void 0, void 0
     try {
         const { owner, name } = (_e = (0, parse_github_url_1.default)(repoUrl)) !== null && _e !== void 0 ? _e : {};
         if (!owner || !name)
-            return { archived: undefined, lowMaintenance: undefined };
+            return { archived: undefined, lowMaintenance: undefined, unverifiable: undefined };
         const response = yield octokit.request('GET /repos/{owner}/{name}', {
             owner,
             name,
         });
         if (response.status !== 200) {
             trackApiFailure('GitHub Repo API', packageName, new Error(`HTTP ${response.status}`));
-            return { archived: undefined, lowMaintenance: undefined };
+            return { archived: undefined, lowMaintenance: undefined, unverifiable: undefined };
         }
         const data = response.data;
         const result = {
             archived: undefined,
             lowMaintenance: undefined,
+            unverifiable: undefined,
         };
         if (data.archived) {
             result.archived = 'Repository archived';
@@ -195,19 +196,30 @@ const checkGitHubRepoStatus = (repoUrl, packageName) => __awaiter(void 0, void 0
         return result;
     }
     catch (error) {
+        // 404 means repo not found (private, deleted, or wrong URL) - flag as unverifiable, not a failure
+        const status = error.status;
+        if (status === 404) {
+            core.warning(`Repository not found for ${packageName} - flagging as unverifiable`);
+            return {
+                archived: undefined,
+                lowMaintenance: undefined,
+                unverifiable: 'Repository not found (private or deleted)',
+            };
+        }
         trackApiFailure('GitHub Repo API', packageName, error);
-        return { archived: undefined, lowMaintenance: undefined };
+        return { archived: undefined, lowMaintenance: undefined, unverifiable: undefined };
     }
 });
 /**
  * Check for open security advisories on GitHub
+ * Returns advisory info, or undefined if none found, or special "unverifiable" string for 404s
  */
 const checkSecurityAdvisories = (repoUrl, packageName) => __awaiter(void 0, void 0, void 0, function* () {
     var _f;
     try {
         const { owner, name } = (_f = (0, parse_github_url_1.default)(repoUrl)) !== null && _f !== void 0 ? _f : {};
         if (!owner || !name)
-            return undefined;
+            return { advisories: undefined, unverifiable: undefined };
         const response = yield octokit.request('GET /repos/{owner}/{name}/security-advisories', {
             owner,
             name,
@@ -215,7 +227,7 @@ const checkSecurityAdvisories = (repoUrl, packageName) => __awaiter(void 0, void
         });
         if (response.status !== 200) {
             trackApiFailure('GitHub Advisories API', packageName, new Error(`HTTP ${response.status}`));
-            return undefined;
+            return { advisories: undefined, unverifiable: undefined };
         }
         const advisories = response.data;
         if (advisories && advisories.length > 0) {
@@ -224,13 +236,22 @@ const checkSecurityAdvisories = (repoUrl, packageName) => __awaiter(void 0, void
                 .map((a) => `[${a.ghsa_id}](https://github.com/advisories/${a.ghsa_id})`)
                 .join(', ');
             const suffix = advisories.length > 3 ? ` (+${advisories.length - 3} more)` : '';
-            return `Advisories: ${advisoryLinks}${suffix}`;
+            return { advisories: `Advisories: ${advisoryLinks}${suffix}`, unverifiable: undefined };
         }
-        return undefined;
+        return { advisories: undefined, unverifiable: undefined };
     }
     catch (error) {
+        // 404 means repo not found - flag as unverifiable, not a failure
+        const status = error.status;
+        if (status === 404) {
+            // Don't log warning here - checkGitHubRepoStatus will already log it
+            return {
+                advisories: undefined,
+                unverifiable: 'Advisories not verifiable (repo not found)',
+            };
+        }
         trackApiFailure('GitHub Advisories API', packageName, error);
-        return undefined;
+        return { advisories: undefined, unverifiable: undefined };
     }
 });
 /**
@@ -244,8 +265,10 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
         checkVulnerabilities(packageName, version),
         repoUrl
             ? checkGitHubRepoStatus(repoUrl, packageName)
-            : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
-        repoUrl ? checkSecurityAdvisories(repoUrl, packageName) : Promise.resolve(),
+            : Promise.resolve({ archived: undefined, lowMaintenance: undefined, unverifiable: undefined }),
+        repoUrl
+            ? checkSecurityAdvisories(repoUrl, packageName)
+            : Promise.resolve({ advisories: undefined, unverifiable: undefined }),
     ]);
     if (deprecation)
         reasons.push(deprecation);
@@ -257,16 +280,25 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
         reasons.push(repoStatus.archived);
     if (repoStatus.lowMaintenance)
         reasons.push(repoStatus.lowMaintenance);
-    if (advisoriesResult)
-        reasons.push(advisoriesResult);
+    if (repoStatus.unverifiable)
+        reasons.push(repoStatus.unverifiable);
+    if (advisoriesResult.advisories)
+        reasons.push(advisoriesResult.advisories);
+    // Only add advisories unverifiable if repo wasn't already flagged as unverifiable
+    if (advisoriesResult.unverifiable && !repoStatus.unverifiable) {
+        reasons.push(advisoriesResult.unverifiable);
+    }
+    // Check if any verification was impossible
+    const hasUnverifiable = repoStatus.unverifiable || advisoriesResult.unverifiable;
     let level = 'Low';
     if (deprecation || vulnResult || repoStatus.archived) {
         level = 'Critical';
     }
-    else if (abandonment || advisoriesResult) {
+    else if (abandonment || advisoriesResult.advisories) {
         level = 'High';
     }
-    else if (repoStatus.lowMaintenance) {
+    else if (repoStatus.lowMaintenance || hasUnverifiable) {
+        // Unverifiable packages get Medium risk - need developer review
         level = 'Medium';
     }
     return {

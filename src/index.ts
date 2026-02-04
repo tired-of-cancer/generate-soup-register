@@ -210,11 +210,16 @@ const checkGitHubRepoStatus = async (
 ): Promise<{
   archived: string | undefined
   lowMaintenance: string | undefined
+  unverifiable: string | undefined
 }> => {
   try {
     const { owner, name } = parseGithubUrl(repoUrl) ?? {}
     if (!owner || !name)
-      return { archived: undefined, lowMaintenance: undefined }
+      return {
+        archived: undefined,
+        lowMaintenance: undefined,
+        unverifiable: undefined,
+      }
 
     const response = await octokit.request('GET /repos/{owner}/{name}', {
       owner,
@@ -227,16 +232,22 @@ const checkGitHubRepoStatus = async (
         packageName,
         new Error(`HTTP ${response.status}`)
       )
-      return { archived: undefined, lowMaintenance: undefined }
+      return {
+        archived: undefined,
+        lowMaintenance: undefined,
+        unverifiable: undefined,
+      }
     }
 
     const data = response.data as TGitHubRepoData
     const result: {
       archived: string | undefined
       lowMaintenance: string | undefined
+      unverifiable: string | undefined
     } = {
       archived: undefined,
       lowMaintenance: undefined,
+      unverifiable: undefined,
     }
 
     if (data.archived) {
@@ -258,21 +269,42 @@ const checkGitHubRepoStatus = async (
 
     return result
   } catch (error) {
+    // 404 means repo not found (private, deleted, or wrong URL) - flag as unverifiable, not a failure
+    const { status } = error as { status?: number }
+    if (status === 404) {
+      core.warning(
+        `Repository not found for ${packageName} - flagging as unverifiable`
+      )
+      return {
+        archived: undefined,
+        lowMaintenance: undefined,
+        unverifiable: 'Repository not found (private or deleted)',
+      }
+    }
     trackApiFailure('GitHub Repo API', packageName, error)
-    return { archived: undefined, lowMaintenance: undefined }
+    return {
+      archived: undefined,
+      lowMaintenance: undefined,
+      unverifiable: undefined,
+    }
   }
 }
 
 /**
  * Check for open security advisories on GitHub
+ * Returns advisory info, or undefined if none found, or special "unverifiable" string for 404s
  */
 const checkSecurityAdvisories = async (
   repoUrl: string,
   packageName: string
-): Promise<string | undefined> => {
+): Promise<{
+  advisories: string | undefined
+  unverifiable: string | undefined
+}> => {
   try {
     const { owner, name } = parseGithubUrl(repoUrl) ?? {}
-    if (!owner || !name) return undefined
+    if (!owner || !name)
+      return { advisories: undefined, unverifiable: undefined }
 
     const response = await octokit.request(
       'GET /repos/{owner}/{name}/security-advisories',
@@ -289,7 +321,7 @@ const checkSecurityAdvisories = async (
         packageName,
         new Error(`HTTP ${response.status}`)
       )
-      return undefined
+      return { advisories: undefined, unverifiable: undefined }
     }
 
     const advisories = response.data as Array<{ ghsa_id: string }>
@@ -302,12 +334,24 @@ const checkSecurityAdvisories = async (
         .join(', ')
       const suffix =
         advisories.length > 3 ? ` (+${advisories.length - 3} more)` : ''
-      return `Advisories: ${advisoryLinks}${suffix}`
+      return {
+        advisories: `Advisories: ${advisoryLinks}${suffix}`,
+        unverifiable: undefined,
+      }
     }
-    return undefined
+    return { advisories: undefined, unverifiable: undefined }
   } catch (error) {
+    // 404 means repo not found - flag as unverifiable, not a failure
+    const { status } = error as { status?: number }
+    if (status === 404) {
+      // Don't log warning here - checkGitHubRepoStatus will already log it
+      return {
+        advisories: undefined,
+        unverifiable: 'Advisories not verifiable (repo not found)',
+      }
+    }
     trackApiFailure('GitHub Advisories API', packageName, error)
-    return undefined
+    return { advisories: undefined, unverifiable: undefined }
   }
 }
 
@@ -329,8 +373,14 @@ const analyzeRisk = async (
     checkVulnerabilities(packageName, version),
     repoUrl
       ? checkGitHubRepoStatus(repoUrl, packageName)
-      : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
-    repoUrl ? checkSecurityAdvisories(repoUrl, packageName) : Promise.resolve(),
+      : Promise.resolve({
+          archived: undefined,
+          lowMaintenance: undefined,
+          unverifiable: undefined,
+        }),
+    repoUrl
+      ? checkSecurityAdvisories(repoUrl, packageName)
+      : Promise.resolve({ advisories: undefined, unverifiable: undefined }),
   ])
 
   if (deprecation) reasons.push(deprecation)
@@ -338,15 +388,25 @@ const analyzeRisk = async (
   if (vulnResult) reasons.push(vulnResult)
   if (repoStatus.archived) reasons.push(repoStatus.archived)
   if (repoStatus.lowMaintenance) reasons.push(repoStatus.lowMaintenance)
-  if (advisoriesResult) reasons.push(advisoriesResult)
+  if (repoStatus.unverifiable) reasons.push(repoStatus.unverifiable)
+  if (advisoriesResult.advisories) reasons.push(advisoriesResult.advisories)
+  // Only add advisories unverifiable if repo wasn't already flagged as unverifiable
+  if (advisoriesResult.unverifiable && !repoStatus.unverifiable) {
+    reasons.push(advisoriesResult.unverifiable)
+  }
+
+  // Check if any verification was impossible
+  const hasUnverifiable =
+    repoStatus.unverifiable || advisoriesResult.unverifiable
 
   let level: TRiskAnalysis['level'] = 'Low'
 
   if (deprecation || vulnResult || repoStatus.archived) {
     level = 'Critical'
-  } else if (abandonment || advisoriesResult) {
+  } else if (abandonment || advisoriesResult.advisories) {
     level = 'High'
-  } else if (repoStatus.lowMaintenance) {
+  } else if (repoStatus.lowMaintenance || hasUnverifiable) {
+    // Unverifiable packages get Medium risk - need developer review
     level = 'Medium'
   }
 
