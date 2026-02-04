@@ -132,12 +132,12 @@ const checkVulnerabilities = (packageName, version) => __awaiter(void 0, void 0,
             return undefined;
         const data = (yield response.json());
         if (data.vulns && data.vulns.length > 0) {
-            const vulnIds = data.vulns
+            const vulnLinks = data.vulns
                 .slice(0, 3)
-                .map((v) => v.id)
+                .map((v) => `[${v.id}](https://osv.dev/vulnerability/${v.id})`)
                 .join(', ');
             const suffix = data.vulns.length > 3 ? ` (+${data.vulns.length - 3} more)` : '';
-            return `Vulnerabilities: ${vulnIds}${suffix}`;
+            return `Vulnerabilities: ${vulnLinks}${suffix}`;
         }
         return undefined;
     }
@@ -201,7 +201,12 @@ const checkSecurityAdvisories = (repoUrl) => __awaiter(void 0, void 0, void 0, f
             return undefined;
         const advisories = response.data;
         if (advisories && advisories.length > 0) {
-            return `Security advisories: ${advisories.length} open`;
+            const advisoryLinks = advisories
+                .slice(0, 3)
+                .map((a) => `[${a.ghsa_id}](https://github.com/advisories/${a.ghsa_id})`)
+                .join(', ');
+            const suffix = advisories.length > 3 ? ` (+${advisories.length - 3} more)` : '';
+            return `Advisories: ${advisoryLinks}${suffix}`;
         }
         return undefined;
     }
@@ -221,7 +226,7 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
         repoUrl
             ? checkGitHubRepoStatus(repoUrl)
             : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
-        repoUrl ? checkSecurityAdvisories(repoUrl) : Promise.resolve(undefined),
+        repoUrl ? checkSecurityAdvisories(repoUrl) : Promise.resolve(),
     ]);
     if (deprecation)
         reasons.push(deprecation);

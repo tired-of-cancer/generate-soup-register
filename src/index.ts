@@ -160,13 +160,13 @@ const checkVulnerabilities = async (
 
     const data = (await response.json()) as TOsvResponse
     if (data.vulns && data.vulns.length > 0) {
-      const vulnIds = data.vulns
+      const vulnLinks = data.vulns
         .slice(0, 3)
-        .map((v) => v.id)
+        .map((v) => `[${v.id}](https://osv.dev/vulnerability/${v.id})`)
         .join(', ')
       const suffix =
         data.vulns.length > 3 ? ` (+${data.vulns.length - 3} more)` : ''
-      return `Vulnerabilities: ${vulnIds}${suffix}`
+      return `Vulnerabilities: ${vulnLinks}${suffix}`
     }
     return undefined
   } catch {
@@ -251,7 +251,15 @@ const checkSecurityAdvisories = async (
 
     const advisories = response.data as Array<{ ghsa_id: string }>
     if (advisories && advisories.length > 0) {
-      return `Security advisories: ${advisories.length} open`
+      const advisoryLinks = advisories
+        .slice(0, 3)
+        .map(
+          (a) => `[${a.ghsa_id}](https://github.com/advisories/${a.ghsa_id})`
+        )
+        .join(', ')
+      const suffix =
+        advisories.length > 3 ? ` (+${advisories.length - 3} more)` : ''
+      return `Advisories: ${advisoryLinks}${suffix}`
     }
     return undefined
   } catch {
