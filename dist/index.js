@@ -56,6 +56,13 @@ const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed';
 const DEFAULT_SOUP_FILENAME = 'SOUP.md';
 // Store for existing verification values parsed from SOUP.md
 let existingVerifications = new Map();
+// Track API failures to halt execution if any occur
+const apiFailures = [];
+const trackApiFailure = (source, packageName, error) => {
+    const message = `${source} failed for ${packageName}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    apiFailures.push(message);
+    core.warning(message);
+};
 node_readline_1.default.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -131,8 +138,10 @@ const checkVulnerabilities = (packageName, version) => __awaiter(void 0, void 0,
                 version: cleanVersion,
             }),
         });
-        if (!response.ok)
+        if (!response.ok) {
+            trackApiFailure('OSV API', packageName, new Error(`HTTP ${response.status}`));
             return undefined;
+        }
         const data = (yield response.json());
         if (data.vulns && data.vulns.length > 0) {
             const vulnLinks = data.vulns
@@ -144,25 +153,28 @@ const checkVulnerabilities = (packageName, version) => __awaiter(void 0, void 0,
         }
         return undefined;
     }
-    catch (_e) {
+    catch (error) {
+        trackApiFailure('OSV API', packageName, error);
         return undefined;
     }
 });
 /**
  * Check GitHub repo status (archived, last push date)
  */
-const checkGitHubRepoStatus = (repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
-    var _f;
+const checkGitHubRepoStatus = (repoUrl, packageName) => __awaiter(void 0, void 0, void 0, function* () {
+    var _e;
     try {
-        const { owner, name } = (_f = (0, parse_github_url_1.default)(repoUrl)) !== null && _f !== void 0 ? _f : {};
+        const { owner, name } = (_e = (0, parse_github_url_1.default)(repoUrl)) !== null && _e !== void 0 ? _e : {};
         if (!owner || !name)
             return { archived: undefined, lowMaintenance: undefined };
         const response = yield octokit.request('GET /repos/{owner}/{name}', {
             owner,
             name,
         });
-        if (response.status !== 200)
+        if (response.status !== 200) {
+            trackApiFailure('GitHub Repo API', packageName, new Error(`HTTP ${response.status}`));
             return { archived: undefined, lowMaintenance: undefined };
+        }
         const data = response.data;
         const result = {
             archived: undefined,
@@ -182,17 +194,18 @@ const checkGitHubRepoStatus = (repoUrl) => __awaiter(void 0, void 0, void 0, fun
         }
         return result;
     }
-    catch (_g) {
+    catch (error) {
+        trackApiFailure('GitHub Repo API', packageName, error);
         return { archived: undefined, lowMaintenance: undefined };
     }
 });
 /**
  * Check for open security advisories on GitHub
  */
-const checkSecurityAdvisories = (repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
-    var _h;
+const checkSecurityAdvisories = (repoUrl, packageName) => __awaiter(void 0, void 0, void 0, function* () {
+    var _f;
     try {
-        const { owner, name } = (_h = (0, parse_github_url_1.default)(repoUrl)) !== null && _h !== void 0 ? _h : {};
+        const { owner, name } = (_f = (0, parse_github_url_1.default)(repoUrl)) !== null && _f !== void 0 ? _f : {};
         if (!owner || !name)
             return undefined;
         const response = yield octokit.request('GET /repos/{owner}/{name}/security-advisories', {
@@ -200,8 +213,10 @@ const checkSecurityAdvisories = (repoUrl) => __awaiter(void 0, void 0, void 0, f
             name,
             state: 'published',
         });
-        if (response.status !== 200)
+        if (response.status !== 200) {
+            trackApiFailure('GitHub Advisories API', packageName, new Error(`HTTP ${response.status}`));
             return undefined;
+        }
         const advisories = response.data;
         if (advisories && advisories.length > 0) {
             const advisoryLinks = advisories
@@ -213,7 +228,8 @@ const checkSecurityAdvisories = (repoUrl) => __awaiter(void 0, void 0, void 0, f
         }
         return undefined;
     }
-    catch (_j) {
+    catch (error) {
+        trackApiFailure('GitHub Advisories API', packageName, error);
         return undefined;
     }
 });
@@ -227,9 +243,9 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
     const [vulnResult, repoStatus, advisoriesResult] = yield Promise.all([
         checkVulnerabilities(packageName, version),
         repoUrl
-            ? checkGitHubRepoStatus(repoUrl)
+            ? checkGitHubRepoStatus(repoUrl, packageName)
             : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
-        repoUrl ? checkSecurityAdvisories(repoUrl) : Promise.resolve(),
+        repoUrl ? checkSecurityAdvisories(repoUrl, packageName) : Promise.resolve(),
     ]);
     if (deprecation)
         reasons.push(deprecation);
@@ -279,7 +295,7 @@ const getVerification = (packageName, riskLevel) => {
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  */
 const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 0, void 0, function* () {
-    var _k, _l;
+    var _g, _h;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
     let soupLanguages = 'unknown';
@@ -287,7 +303,7 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
     let repoUrl;
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
         const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
-        if ((_k = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _k === void 0 ? void 0 : _k.url) {
+        if ((_g = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _g === void 0 ? void 0 : _g.url) {
             repoUrl = versionSpecificSoupData.repository.url;
             if (repoUrl.includes('github')) {
                 soupLanguages = yield getSoupLanguageData(repoUrl);
@@ -295,7 +311,7 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
         }
         soupSite =
             (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
-                ((_l = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _l === void 0 ? void 0 : _l.url) ||
+                ((_h = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _h === void 0 ? void 0 : _h.url) ||
                 'unknown';
     }
     const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl);
@@ -456,6 +472,13 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     const repositorySoupRequests = [];
     packageJSONs.forEach((packageJson) => repositorySoupRequests.push(getSoupDataForPackageCollection(packageJson)));
     const soupData = yield Promise.all(repositorySoupRequests);
+    // Check for API failures before writing - don't override historic data with incomplete data
+    if (apiFailures.length > 0) {
+        core.error(`❌ ${apiFailures.length} API call(s) failed during risk analysis:`);
+        apiFailures.forEach((failure) => core.error(`  - ${failure}`));
+        core.setFailed('SOUP generation aborted due to API failures. Existing SOUP.md preserved to prevent data loss.');
+        return;
+    }
     const soupHeader = generateSoupHeader(packageJSONs);
     const soupRegister = soupHeader + soupData.join('\n\n');
     core.info(`✅ SOUP data retrieved`);

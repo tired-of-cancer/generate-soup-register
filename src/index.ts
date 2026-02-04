@@ -16,6 +16,21 @@ const DEFAULT_SOUP_FILENAME = 'SOUP.md'
 // Store for existing verification values parsed from SOUP.md
 let existingVerifications: Map<string, string> = new Map()
 
+// Track API failures to halt execution if any occur
+const apiFailures: string[] = []
+
+const trackApiFailure = (
+  source: string,
+  packageName: string,
+  error: unknown
+) => {
+  const message = `${source} failed for ${packageName}: ${
+    error instanceof Error ? error.message : 'Unknown error'
+  }`
+  apiFailures.push(message)
+  core.warning(message)
+}
+
 type TPackageJson = {
   name: string
   dependencies?: { [key: string]: string }
@@ -160,7 +175,14 @@ const checkVulnerabilities = async (
       }),
     })
 
-    if (!response.ok) return undefined
+    if (!response.ok) {
+      trackApiFailure(
+        'OSV API',
+        packageName,
+        new Error(`HTTP ${response.status}`)
+      )
+      return undefined
+    }
 
     const data = (await response.json()) as TOsvResponse
     if (data.vulns && data.vulns.length > 0) {
@@ -173,7 +195,8 @@ const checkVulnerabilities = async (
       return `Vulnerabilities: ${vulnLinks}${suffix}`
     }
     return undefined
-  } catch {
+  } catch (error) {
+    trackApiFailure('OSV API', packageName, error)
     return undefined
   }
 }
@@ -182,7 +205,8 @@ const checkVulnerabilities = async (
  * Check GitHub repo status (archived, last push date)
  */
 const checkGitHubRepoStatus = async (
-  repoUrl: string
+  repoUrl: string,
+  packageName: string
 ): Promise<{
   archived: string | undefined
   lowMaintenance: string | undefined
@@ -197,8 +221,14 @@ const checkGitHubRepoStatus = async (
       name,
     })
 
-    if (response.status !== 200)
+    if (response.status !== 200) {
+      trackApiFailure(
+        'GitHub Repo API',
+        packageName,
+        new Error(`HTTP ${response.status}`)
+      )
       return { archived: undefined, lowMaintenance: undefined }
+    }
 
     const data = response.data as TGitHubRepoData
     const result: {
@@ -227,7 +257,8 @@ const checkGitHubRepoStatus = async (
     }
 
     return result
-  } catch {
+  } catch (error) {
+    trackApiFailure('GitHub Repo API', packageName, error)
     return { archived: undefined, lowMaintenance: undefined }
   }
 }
@@ -236,7 +267,8 @@ const checkGitHubRepoStatus = async (
  * Check for open security advisories on GitHub
  */
 const checkSecurityAdvisories = async (
-  repoUrl: string
+  repoUrl: string,
+  packageName: string
 ): Promise<string | undefined> => {
   try {
     const { owner, name } = parseGithubUrl(repoUrl) ?? {}
@@ -251,7 +283,14 @@ const checkSecurityAdvisories = async (
       }
     )
 
-    if (response.status !== 200) return undefined
+    if (response.status !== 200) {
+      trackApiFailure(
+        'GitHub Advisories API',
+        packageName,
+        new Error(`HTTP ${response.status}`)
+      )
+      return undefined
+    }
 
     const advisories = response.data as Array<{ ghsa_id: string }>
     if (advisories && advisories.length > 0) {
@@ -266,7 +305,8 @@ const checkSecurityAdvisories = async (
       return `Advisories: ${advisoryLinks}${suffix}`
     }
     return undefined
-  } catch {
+  } catch (error) {
+    trackApiFailure('GitHub Advisories API', packageName, error)
     return undefined
   }
 }
@@ -288,9 +328,9 @@ const analyzeRisk = async (
   const [vulnResult, repoStatus, advisoriesResult] = await Promise.all([
     checkVulnerabilities(packageName, version),
     repoUrl
-      ? checkGitHubRepoStatus(repoUrl)
+      ? checkGitHubRepoStatus(repoUrl, packageName)
       : Promise.resolve({ archived: undefined, lowMaintenance: undefined }),
-    repoUrl ? checkSecurityAdvisories(repoUrl) : Promise.resolve(),
+    repoUrl ? checkSecurityAdvisories(repoUrl, packageName) : Promise.resolve(),
   ])
 
   if (deprecation) reasons.push(deprecation)
@@ -568,6 +608,18 @@ const generateSoupRegister = async () => {
   )
 
   const soupData = await Promise.all(repositorySoupRequests)
+
+  // Check for API failures before writing - don't override historic data with incomplete data
+  if (apiFailures.length > 0) {
+    core.error(
+      `❌ ${apiFailures.length} API call(s) failed during risk analysis:`
+    )
+    apiFailures.forEach((failure) => core.error(`  - ${failure}`))
+    core.setFailed(
+      'SOUP generation aborted due to API failures. Existing SOUP.md preserved to prevent data loss.'
+    )
+    return
+  }
 
   const soupHeader = generateSoupHeader(packageJSONs)
 
