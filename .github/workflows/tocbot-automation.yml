@@ -11,26 +11,76 @@ jobs:
       (github.event.requested_reviewers && contains(github.event.requested_reviewers.*.login, 'ToCbot'))
     runs-on: ubuntu-latest
     steps:
-      - name: Add "bugbot run" comment
+      - name: Trigger bugbot via TocBot
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.TOC_BOT_PAT }}
           script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'bugbot run'
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // If TocBot already authored the PR, just comment and remove reviewer
+            if (pr.user.login === 'ToCbot') {
+              await github.rest.issues.createComment({
+                issue_number: pr.number, owner, repo,
+                body: 'bugbot run'
+              });
+              await github.rest.pulls.removeRequestedReviewers({
+                owner, repo, pull_number: pr.number,
+                reviewers: ['ToCbot']
+              });
+              return;
+            }
+
+            // Bugbot only acts when TocBot is the PR author, so we recreate
+            // the PR under TocBot's identity and link back to the original.
+
+            // Gather metadata to copy over
+            const labels = pr.labels.map(l => l.name);
+            const assignees = pr.assignees.map(a => a.login);
+
+            // Create new PR as TocBot (TOC_BOT_PAT makes TocBot the author)
+            const { data: newPr } = await github.rest.pulls.create({
+              owner, repo,
+              title: pr.title,
+              body: [
+                pr.body || '',
+                '',
+                '---',
+                `_Recreated from #${pr.number} to enable automated code review._`
+              ].join('\n'),
+              head: pr.head.ref,
+              base: pr.base.ref,
             });
 
-      - name: Remove TocBot as reviewer
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.TOC_BOT_PAT }}
-          script: |
-            await github.rest.pulls.removeRequestedReviewers({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              reviewers: ['ToCbot']
+            core.info(`Created new PR #${newPr.number}`);
+
+            // Copy labels
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: newPr.number, labels
+              });
+            }
+
+            // Copy assignees
+            if (assignees.length > 0) {
+              await github.rest.issues.addAssignees({
+                owner, repo, issue_number: newPr.number, assignees
+              });
+            }
+
+            // Close original PR with a reference to the new one
+            await github.rest.issues.createComment({
+              issue_number: pr.number, owner, repo,
+              body: `🔄 Recreated as #${newPr.number} to enable automated code review by bugbot.`
+            });
+            await github.rest.pulls.update({
+              owner, repo, pull_number: pr.number, state: 'closed'
+            });
+
+            // Trigger bugbot on the new PR
+            await github.rest.issues.createComment({
+              issue_number: newPr.number, owner, repo,
+              body: 'bugbot run'
             });
