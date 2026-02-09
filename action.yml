@@ -11,3 +11,6 @@ inputs:
   token:
     description: 'GITHUB_TOKEN or a `repo` scoped Personal Access Token (PAT)'
     default: ${{ github.token }}
+  flag-gpl-as-high-risk:
+    description: 'Treat GPL/AGPL licenses as High risk (relevant for proprietary medical devices)'
+    default: 'true'

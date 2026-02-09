@@ -43,6 +43,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 /* eslint-disable import/no-extraneous-dependencies */
+const node_child_process_1 = __nccwpck_require__(7718);
 const node_fs_1 = __importDefault(__nccwpck_require__(7561));
 const path = __nccwpck_require__(1017);
 const node_path_1 = __nccwpck_require__(9411);
@@ -55,7 +56,32 @@ const semver_1 = __nccwpck_require__(1383);
 const DEFAULT_VERIFICATION_LOW = 'SOUP analysed and accepted by developer';
 const DEFAULT_VERIFICATION_RISK = '⚠️ Risk to be analysed';
 const DEFAULT_SOUP_FILENAME = 'SOUP.md';
+// License risk categories
+const PERMISSIVE_LICENSES = [
+    'MIT',
+    'Apache-2.0',
+    'BSD-2-Clause',
+    'BSD-3-Clause',
+    'ISC',
+    '0BSD',
+    'Unlicense',
+    'CC0-1.0',
+    'WTFPL',
+];
+const WEAK_COPYLEFT_LICENSES = ['MPL-2.0', 'LGPL-2.0', 'LGPL-2.1', 'LGPL-3.0'];
+const STRONG_COPYLEFT_LICENSES = [
+    'GPL-2.0',
+    'GPL-3.0',
+    'AGPL-3.0',
+    'GPL-2.0-only',
+    'GPL-2.0-or-later',
+    'GPL-3.0-only',
+    'GPL-3.0-or-later',
+    'AGPL-3.0-only',
+    'AGPL-3.0-or-later',
+];
 let existingVerifications = new Map();
+let existingIndirectVerifications = new Map();
 // Track API failures to halt execution if any occur
 const apiFailures = [];
 const trackApiFailure = (source, packageName, error) => {
@@ -95,6 +121,415 @@ const getSoupLanguageData = (soupRepoUrl) => __awaiter(void 0, void 0, void 0, f
         return 'unknown';
     }
 });
+/**
+ * Check license risk based on license type
+ * @param license string: the license from NPM registry
+ * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
+ */
+const checkLicenseRisk = (license, flagGplAsHighRisk) => {
+    if (!license) {
+        return {
+            category: 'Unknown',
+            risk: 'Medium',
+            reason: 'License: Unknown or missing',
+        };
+    }
+    // Normalize license string for comparison
+    const normalizedLicense = license.toUpperCase();
+    // Check permissive licenses
+    if (PERMISSIVE_LICENSES.some((l) => normalizedLicense.includes(l.toUpperCase()))) {
+        return {
+            category: 'Permissive',
+            risk: 'Low',
+            reason: undefined,
+        };
+    }
+    // Check strong copyleft licenses
+    if (STRONG_COPYLEFT_LICENSES.some((l) => normalizedLicense.includes(l.toUpperCase()))) {
+        return {
+            category: 'Strong Copyleft',
+            risk: flagGplAsHighRisk ? 'High' : 'Medium',
+            reason: flagGplAsHighRisk
+                ? `License: ${license} (copyleft - may require source disclosure)`
+                : `License: ${license} (copyleft)`,
+        };
+    }
+    // Check weak copyleft licenses
+    if (WEAK_COPYLEFT_LICENSES.some((l) => normalizedLicense.includes(l.toUpperCase()))) {
+        return {
+            category: 'Weak Copyleft',
+            risk: 'Medium',
+            reason: `License: ${license} (weak copyleft)`,
+        };
+    }
+    // Unknown license
+    return {
+        category: 'Unknown',
+        risk: 'Medium',
+        reason: `License: ${license} (unrecognized)`,
+    };
+};
+/**
+ * Parse signature audit JSON output
+ */
+const parseSignatureAuditOutput = (jsonString) => {
+    var _a, _b;
+    try {
+        const data = JSON.parse(jsonString);
+        return {
+            invalid: new Set(((_a = data.invalid) !== null && _a !== void 0 ? _a : []).map((p) => p.name)),
+            missing: new Set(((_b = data.missing) !== null && _b !== void 0 ? _b : []).map((p) => p.name)),
+        };
+    }
+    catch (_c) {
+        return { invalid: new Set(), missing: new Set() };
+    }
+};
+/**
+ * Run npm audit signatures to verify package registry signatures
+ * Returns packages with invalid or missing signatures
+ */
+const runSignatureAudit = (rootPath) => {
+    try {
+        const result = (0, node_child_process_1.execSync)('npm audit signatures --json 2>/dev/null', {
+            cwd: rootPath,
+            encoding: 'utf8',
+            maxBuffer: 10 * 1024 * 1024,
+        });
+        return parseSignatureAuditOutput(result);
+    }
+    catch (error) {
+        // npm audit signatures may fail or not be available
+        const execError = error;
+        if (execError.stdout) {
+            const parsed = parseSignatureAuditOutput(execError.stdout);
+            if (parsed.invalid.size > 0 || parsed.missing.size > 0) {
+                return parsed;
+            }
+        }
+        core.warning('npm audit signatures not available - skipping signature verification');
+        return { invalid: new Set(), missing: new Set() };
+    }
+};
+/**
+ * Parse yarn.lock to extract packages with integrity hashes
+ * Returns set of package names that have integrity hashes in lockfile
+ */
+const parseLockfileIntegrities = (rootPath) => {
+    const hashes = new Set();
+    // Try yarn.lock first
+    const yarnLockPath = (0, node_path_1.join)(rootPath, 'yarn.lock');
+    if (node_fs_1.default.existsSync(yarnLockPath)) {
+        try {
+            const content = node_fs_1.default.readFileSync(yarnLockPath, 'utf8');
+            // yarn.lock v1 format: package name followed by integrity on subsequent line
+            // Format: "package@version":
+            //   integrity sha512-...
+            const packageRegex = /^"?(@?[^\n"@]+)@[^\n":]+/gm;
+            const integrityRegex = /^\s+integrity\s+sha\d+-/gm;
+            // Collect all package positions
+            const packagePositions = [];
+            const packageMatches = content.matchAll(packageRegex);
+            [...packageMatches].forEach((m) => {
+                var _a;
+                packagePositions.push({ name: m[1], index: (_a = m.index) !== null && _a !== void 0 ? _a : 0 });
+            });
+            // Find packages with integrity hashes
+            const integrityMatches = content.matchAll(integrityRegex);
+            [...integrityMatches].forEach((integrityMatch) => {
+                // Find the package this integrity belongs to (last package before this integrity line)
+                const matchingPackage = packagePositions
+                    .filter((p) => { var _a; return p.index < ((_a = integrityMatch.index) !== null && _a !== void 0 ? _a : 0); })
+                    .at(-1);
+                if (matchingPackage) {
+                    hashes.add(matchingPackage.name);
+                }
+            });
+            return hashes;
+        }
+        catch (_a) {
+            core.warning('Failed to parse yarn.lock for integrity hashes');
+        }
+    }
+    // Try package-lock.json as fallback
+    const npmLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
+    if (node_fs_1.default.existsSync(npmLockPath)) {
+        try {
+            const content = node_fs_1.default.readFileSync(npmLockPath, 'utf8');
+            const lockData = JSON.parse(content);
+            // npm lockfile v2/v3 format
+            if (lockData.packages) {
+                Object.entries(lockData.packages).forEach(([packagePath, packageData]) => {
+                    if (packageData.integrity) {
+                        // Extract package name from path (e.g., "node_modules/@scope/name")
+                        const pathMatch = packagePath.match(/node_modules\/(.+)$/);
+                        if (pathMatch) {
+                            hashes.add(pathMatch[1]);
+                        }
+                    }
+                });
+            }
+            // npm lockfile v1 format
+            if (lockData.dependencies) {
+                Object.entries(lockData.dependencies).forEach(([name, data]) => {
+                    if (data.integrity) {
+                        hashes.add(name);
+                    }
+                });
+            }
+            return hashes;
+        }
+        catch (_b) {
+            core.warning('Failed to parse package-lock.json for integrity hashes');
+        }
+    }
+    return hashes;
+};
+/**
+ * Run integrity checks (signature audit + lockfile hashes)
+ * Returns combined integrity results, or empty results if checks unavailable
+ */
+const runIntegrityChecks = (rootPath) => {
+    const signatureResult = runSignatureAudit(rootPath);
+    const lockfileHashes = parseLockfileIntegrities(rootPath);
+    return {
+        invalidSignatures: signatureResult.invalid,
+        missingSignatures: signatureResult.missing,
+        lockfileHashes,
+    };
+};
+/**
+ * Check integrity status for a specific package
+ */
+const checkIntegrityStatus = (packageName, integrityResult) => {
+    if (integrityResult.invalidSignatures.has(packageName)) {
+        return 'Integrity: Invalid registry signature';
+    }
+    if (integrityResult.missingSignatures.has(packageName)) {
+        // Check if lockfile has hash as fallback
+        if (!integrityResult.lockfileHashes.has(packageName)) {
+            return 'Integrity: No signature or lockfile hash';
+        }
+        // Has lockfile hash but no signature - informational only, not a risk
+        return undefined;
+    }
+    return undefined;
+};
+/**
+ * Execute audit command and return stdout
+ * Uses yarn audit if yarn.lock exists, otherwise npm audit
+ */
+const executeAudit = (rootPath) => {
+    const hasYarnLock = node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'yarn.lock'));
+    const hasPackageLock = node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'package-lock.json'));
+    // Prefer yarn audit if yarn.lock exists
+    if (hasYarnLock) {
+        try {
+            const result = (0, node_child_process_1.execSync)('yarn audit --json 2>/dev/null', {
+                cwd: rootPath,
+                encoding: 'utf8',
+                maxBuffer: 10 * 1024 * 1024,
+            });
+            return { result, isYarn: true };
+        }
+        catch (error) {
+            // yarn audit exits with non-zero when vulnerabilities found
+            const execError = error;
+            if (execError.stdout) {
+                return { result: execError.stdout, isYarn: true };
+            }
+            // If yarn audit fails completely, fall through to npm if package-lock exists
+            if (!hasPackageLock) {
+                return { result: undefined, isYarn: true };
+            }
+        }
+    }
+    // Fall back to npm audit
+    if (hasPackageLock) {
+        try {
+            const result = (0, node_child_process_1.execSync)('npm audit --json 2>/dev/null', {
+                cwd: rootPath,
+                encoding: 'utf8',
+                maxBuffer: 10 * 1024 * 1024,
+            });
+            return { result, isYarn: false };
+        }
+        catch (error) {
+            const execError = error;
+            if (execError.stdout) {
+                return { result: execError.stdout, isYarn: false };
+            }
+        }
+    }
+    return { result: undefined, isYarn: hasYarnLock };
+};
+const parseYarnAuditOutput = (result, directDeps) => {
+    const directVulns = new Map();
+    const indirectVulns = [];
+    // Yarn outputs newline-delimited JSON
+    const lines = result.split('\n').filter((line) => line.trim());
+    lines.forEach((line) => {
+        var _a, _b;
+        try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === 'auditAdvisory') {
+                const advisory = parsed;
+                const { module_name: name, severity, url, recommendation, findings, } = advisory.data.advisory;
+                const { path: depPath, dev, id: resolutionId, } = advisory.data.resolution;
+                // Extract version from findings
+                const version = ((_a = findings === null || findings === void 0 ? void 0 : findings[0]) === null || _a === void 0 ? void 0 : _a.version) || 'unknown';
+                // Check if this is a direct dependency
+                const isDirect = directDeps.has(name);
+                if (isDirect) {
+                    // Create a compatible structure for direct vulnerabilities
+                    if (!directVulns.has(name)) {
+                        directVulns.set(name, {
+                            name,
+                            severity: severity,
+                            isDirect: true,
+                            via: [{ source: resolutionId, name, url }],
+                            effects: [],
+                            range: '*',
+                            fixAvailable: !!recommendation,
+                        });
+                    }
+                }
+                else {
+                    // Indirect/transitive vulnerability
+                    const vulnPath = depPath || `(transitive) > ${name}`;
+                    const key = `${name}|${version}|${vulnPath}`;
+                    const existing = existingIndirectVerifications.get(key);
+                    indirectVulns.push({
+                        name,
+                        version,
+                        severity,
+                        advisory: url || 'See yarn audit',
+                        recommendation: recommendation || 'Check for updates',
+                        type: dev ? 'Dev' : 'Transitive',
+                        dependencyPath: vulnPath,
+                        verification: (_b = existing === null || existing === void 0 ? void 0 : existing.verification) !== null && _b !== void 0 ? _b : DEFAULT_VERIFICATION_RISK,
+                    });
+                }
+            }
+        }
+        catch (_c) {
+            // Skip unparseable lines
+        }
+    });
+    return { directVulns, indirectVulns };
+};
+/**
+ * Parse npm audit JSON output
+ */
+const parseNpmAuditOutput = (result) => {
+    const directVulns = new Map();
+    const indirectVulns = [];
+    const auditData = JSON.parse(result);
+    if (auditData.vulnerabilities) {
+        Object.entries(auditData.vulnerabilities).forEach(([name, vuln]) => {
+            var _a;
+            if (vuln.isDirect) {
+                directVulns.set(name, vuln);
+            }
+            else {
+                // Indirect/transitive vulnerability
+                const advisory = vuln.via && typeof vuln.via[0] === 'object' && vuln.via[0].url
+                    ? vuln.via[0].url
+                    : 'See npm audit';
+                let recommendation = 'Check for updates';
+                if (vuln.fixAvailable) {
+                    if (typeof vuln.fixAvailable === 'object') {
+                        recommendation = `Upgrade ${vuln.fixAvailable.name} to ${vuln.fixAvailable.version}`;
+                        if (vuln.fixAvailable.isSemVerMajor) {
+                            recommendation += ' (major version change)';
+                        }
+                    }
+                    else {
+                        recommendation = 'Run npm audit fix';
+                    }
+                }
+                // Build dependency path from effects
+                const dependencyPath = vuln.effects.length > 0
+                    ? `${vuln.effects[0]} > ${name}`
+                    : `(transitive) > ${name}`;
+                const version = vuln.range || 'unknown';
+                const key = `${name}|${version}|${dependencyPath}`;
+                const existingVerification = existingIndirectVerifications.get(key);
+                indirectVulns.push({
+                    name,
+                    version,
+                    severity: vuln.severity,
+                    advisory,
+                    recommendation,
+                    type: 'Transitive',
+                    dependencyPath,
+                    verification: (_a = existingVerification === null || existingVerification === void 0 ? void 0 : existingVerification.verification) !== null && _a !== void 0 ? _a : DEFAULT_VERIFICATION_RISK,
+                });
+            }
+        });
+    }
+    return { directVulns, indirectVulns };
+};
+/**
+ * Run audit and parse results
+ * Uses yarn audit if yarn.lock exists, otherwise npm audit
+ * Returns vulnerability data for direct and indirect dependencies
+ */
+const runAudit = (rootPath, directDeps) => {
+    const { result, isYarn } = executeAudit(rootPath);
+    if (!result) {
+        core.warning(`${isYarn ? 'yarn' : 'npm'} audit failed - continuing without audit data`);
+        return {
+            directVulns: new Map(),
+            indirectVulns: [],
+        };
+    }
+    try {
+        if (isYarn) {
+            return parseYarnAuditOutput(result, directDeps);
+        }
+        return parseNpmAuditOutput(result);
+    }
+    catch (error) {
+        core.warning(`${isYarn ? 'yarn' : 'npm'} audit parse failed: ${error instanceof Error ? error.message : 'Unknown error'} - continuing without audit data`);
+        return {
+            directVulns: new Map(),
+            indirectVulns: [],
+        };
+    }
+};
+/**
+ * Format npm audit findings for a direct dependency
+ */
+const formatAuditFinding = (vuln) => {
+    var _a;
+    const severityMap = {
+        critical: 'Critical',
+        high: 'High',
+        moderate: 'Moderate',
+        low: 'Low',
+        info: 'Info',
+    };
+    return `npm audit: ${(_a = severityMap[vuln.severity]) !== null && _a !== void 0 ? _a : vuln.severity} severity`;
+};
+/**
+ * Generate markdown section for indirect/dev vulnerabilities
+ */
+const generateIndirectVulnerabilitiesSection = (vulns) => {
+    if (vulns.length === 0)
+        return '';
+    const header = `## Indirect and Development Dependencies
+
+The following vulnerabilities were found in transitive or development dependencies. These are not direct dependencies but may still pose a risk.
+
+| Package | Version | Dependency Path | Severity | Advisory | Recommendation | Type | Verification |
+|---------|---------|-----------------|----------|----------|----------------|------|--------------|
+`;
+    const rows = vulns
+        .map((v) => `| ${v.name} | ${v.version} | ${v.dependencyPath} | ${v.severity} | ${v.advisory} | ${v.recommendation} | ${v.type} | ${v.verification} |`)
+        .join('\n');
+    return `\n\n${header}${rows}`;
+};
 /**
  * Check if package is deprecated via NPM registry data
  */
@@ -443,11 +878,12 @@ const checkSecurityAdvisories = (repoUrl, packageName, version) => __awaiter(voi
 /**
  * Perform all risk checks and calculate overall risk level
  */
-const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0, void 0, void 0, function* () {
+const analyzeRisk = (npmData, packageName, version, repoUrl, licenseRisk, integrityResult, npmAuditVuln) => __awaiter(void 0, void 0, void 0, function* () {
     const reasons = [];
     const deprecation = checkDeprecation(npmData, version);
     const abandonment = checkAbandonment(npmData);
     const versionLag = checkVersionLag(npmData, version);
+    const integrityStatus = checkIntegrityStatus(packageName, integrityResult);
     const [vulnResult, repoStatus, advisoriesResult] = yield Promise.all([
         checkVulnerabilities(packageName, version),
         repoUrl
@@ -481,21 +917,41 @@ const analyzeRisk = (npmData, packageName, version, repoUrl) => __awaiter(void 0
     if (advisoriesResult.unverifiable && !repoStatus.unverifiable) {
         reasons.push(advisoriesResult.unverifiable);
     }
+    // Add license risk reason if any
+    if (licenseRisk.reason)
+        reasons.push(licenseRisk.reason);
+    // Add integrity status if any issues
+    if (integrityStatus)
+        reasons.push(integrityStatus);
+    // Add npm audit finding if any
+    if (npmAuditVuln)
+        reasons.push(formatAuditFinding(npmAuditVuln));
     // Check if any verification was impossible
     const hasUnverifiable = repoStatus.unverifiable || advisoriesResult.unverifiable;
+    // Check for integrity issues (only if we got valid results)
+    const hasIntegrityIssue = integrityResult.invalidSignatures.size > 0 ||
+        integrityResult.missingSignatures.size > 0
+        ? !!integrityStatus
+        : false;
+    // Check for high severity npm audit findings
+    const hasHighAuditFinding = npmAuditVuln &&
+        (npmAuditVuln.severity === 'critical' || npmAuditVuln.severity === 'high');
     let level = 'Low';
-    if (deprecation || vulnResult || repoStatus.archived) {
+    if (deprecation || vulnResult || repoStatus.archived || hasHighAuditFinding) {
         level = 'Critical';
     }
     else if (abandonment ||
         advisoriesResult.advisories ||
-        versionLag.severity === 'high') {
+        versionLag.severity === 'high' ||
+        licenseRisk.risk === 'High') {
         level = 'High';
     }
     else if (repoStatus.lowMaintenance ||
         hasUnverifiable ||
-        versionLag.severity === 'medium') {
-        // Unverifiable packages get Medium risk - need developer review
+        versionLag.severity === 'medium' ||
+        licenseRisk.risk === 'Medium' ||
+        hasIntegrityIssue) {
+        // Unverifiable packages, license issues, or integrity issues get Medium risk
         level = 'Medium';
     }
     return {
@@ -547,17 +1003,23 @@ const getVerification = (packageName, currentVersion, currentRiskLevel, currentR
  * Method to request SOUP package information from NPM
  * @param soupName string: name of the SOUP as listed in our package file
  * @param soupVersion string: version of the SOUP as listed in our lockfile
+ * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
+ * @param integrityResult TIntegrityResult: results from integrity checks
+ * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
  */
-const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 0, void 0, function* () {
-    var _g, _h;
+const getSoupDataForPackage = (soupName, soupVersion, flagGplAsHighRisk, integrityResult, auditVulns) => __awaiter(void 0, void 0, void 0, function* () {
+    var _g, _h, _j;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
     let soupLanguages = 'unknown';
     let soupSite = 'private repo';
     let repoUrl;
+    // Extract license from NPM data
+    const soupLicense = (_g = soupData === null || soupData === void 0 ? void 0 : soupData.license) !== null && _g !== void 0 ? _g : 'Unknown';
+    const licenseRisk = checkLicenseRisk(soupData === null || soupData === void 0 ? void 0 : soupData.license, flagGplAsHighRisk);
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
         const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
-        if ((_g = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _g === void 0 ? void 0 : _g.url) {
+        if ((_h = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _h === void 0 ? void 0 : _h.url) {
             repoUrl = versionSpecificSoupData.repository.url;
             if (repoUrl.includes('github')) {
                 soupLanguages = yield getSoupLanguageData(repoUrl);
@@ -565,14 +1027,17 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
         }
         soupSite =
             (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
-                ((_h = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _h === void 0 ? void 0 : _h.url) ||
+                ((_j = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _j === void 0 ? void 0 : _j.url) ||
                 'unknown';
     }
-    const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl);
+    // Get npm audit vulnerability for this package if any
+    const npmAuditVuln = auditVulns.get(soupName);
+    const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl, licenseRisk, integrityResult, npmAuditVuln);
     return {
         soupName,
         soupLanguages,
         soupSite,
+        soupLicense,
         soupVersion,
         soupRiskLevel: riskAnalysis.level,
         soupRiskDetails: riskAnalysis.reasons.join('; '),
@@ -584,10 +1049,10 @@ const getSoupDataForPackage = (soupName, soupVersion) => __awaiter(void 0, void 
  * @param soupData TSoupData: the data generated by the other methods
  */
 const generateSoupTable = (soupData) => {
-    const tableHeader = '| Package Name | Programming Languages | Website | Version | Risk Level | Risk Details | Verification |\n|---|---|---|---|---|---|---|\n';
+    const tableHeader = '| Package Name | Programming Languages | Website | License | Version | Risk Level | Risk Details | Verification |\n|---|---|---|---|---|---|---|---|\n';
     const tableContents = [];
     soupData.forEach((data) => {
-        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${data.soupVerification} |`);
+        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupLicense} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${data.soupVerification} |`);
     });
     return tableHeader + tableContents.sort().join('\n');
 };
@@ -619,11 +1084,14 @@ const findFilesRecursive = (directory, resultArray) => {
  * But in mono-repos this will be called once for each package.json file in the subfolders of the repo
  * (excluding node_modules)
  * @param packageJSON TPackageJson: the contents of a single package JSON to generate a SOUP table for
+ * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
+ * @param integrityResult TIntegrityResult: results from integrity checks
+ * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
  */
-const getSoupDataForPackageCollection = (packageJSON) => __awaiter(void 0, void 0, void 0, function* () {
+const getSoupDataForPackageCollection = (packageJSON, flagGplAsHighRisk, integrityResult, auditVulns) => __awaiter(void 0, void 0, void 0, function* () {
     const soupDataRequests = [];
     if (packageJSON.dependencies) {
-        Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) => soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion)));
+        Object.entries(packageJSON.dependencies).forEach(([soupName, soupVersion]) => soupDataRequests.push(getSoupDataForPackage(soupName, soupVersion, flagGplAsHighRisk, integrityResult, auditVulns)));
     }
     const soupData = yield Promise.all(soupDataRequests);
     const header = `## ${packageJSON.name}\n\n`;
@@ -666,15 +1134,36 @@ const parseExistingVerifications = (soupPath) => {
                 .split('|')
                 .map((cell) => cell.trim())
                 .filter((cell) => cell.length > 0);
-            // Table has 7 columns: Name, Languages, Website, Version, Risk Level, Risk Details, Verification
-            if (cells.length >= 7) {
+            // Table has 8 columns: Name, Languages, Website, License, Version, Risk Level, Risk Details, Verification
+            // Also support old 7-column format for backwards compatibility
+            if (cells.length >= 8) {
+                // New format with License column
+                const packageName = cells[0];
+                const version = cells[4];
+                const riskLevel = cells[5];
+                const riskDetails = cells[6];
+                const verification = cells[7];
+                // Only store non-default verifications (custom entries)
+                // Also exclude entries that are already flagged for re-assessment
+                if (verification &&
+                    verification !== DEFAULT_VERIFICATION_LOW &&
+                    verification !== DEFAULT_VERIFICATION_RISK &&
+                    !verification.startsWith('⚠️ Re-assess')) {
+                    existingVerifications.set(packageName, {
+                        version,
+                        riskLevel,
+                        riskDetails,
+                        verification,
+                    });
+                }
+            }
+            else if (cells.length >= 7) {
+                // Old format without License column (backwards compatibility)
                 const packageName = cells[0];
                 const version = cells[3];
                 const riskLevel = cells[4];
                 const riskDetails = cells[5];
                 const verification = cells[6];
-                // Only store non-default verifications (custom entries)
-                // Also exclude entries that are already flagged for re-assessment
                 if (verification &&
                     verification !== DEFAULT_VERIFICATION_LOW &&
                     verification !== DEFAULT_VERIFICATION_RISK &&
@@ -697,19 +1186,84 @@ const parseExistingVerifications = (soupPath) => {
     }
 };
 /**
+ * Parse existing SOUP.md to extract verification values for indirect dependencies.
+ * This allows preserving custom verification text across regenerations.
+ * @param soupPath string: path to the existing SOUP.md file
+ */
+const parseExistingIndirectVerifications = (soupPath) => {
+    existingIndirectVerifications = new Map();
+    if (!node_fs_1.default.existsSync(soupPath))
+        return;
+    try {
+        const content = node_fs_1.default.readFileSync(soupPath, 'utf8');
+        // Find the indirect dependencies section
+        const indirectSectionStart = content.indexOf('## Indirect and Development Dependencies');
+        if (indirectSectionStart === -1)
+            return;
+        const indirectContent = content.slice(indirectSectionStart);
+        const lines = indirectContent.split('\n');
+        // Filter to table data rows
+        // Skip separator rows (---) and header row (Package)
+        lines
+            .filter((line) => line.startsWith('|') &&
+            !line.includes('---') &&
+            !line.includes('Package'))
+            .forEach((line) => {
+            const cells = line
+                .split('|')
+                .map((cell) => cell.trim())
+                .filter((cell) => cell.length > 0);
+            // Table has 8 columns: Package, Version, Dependency Path, Severity,
+            // Advisory, Recommendation, Type, Verification
+            if (cells.length >= 8) {
+                const packageName = cells[0];
+                const version = cells[1];
+                const dependencyPath = cells[2];
+                const verification = cells[7];
+                // Create unique key from package, version, and path
+                const key = `${packageName}|${version}|${dependencyPath}`;
+                // Only store non-default verifications (custom entries)
+                if (verification &&
+                    verification !== DEFAULT_VERIFICATION_RISK &&
+                    !verification.startsWith('⚠️ Re-assess')) {
+                    existingIndirectVerifications.set(key, { verification });
+                }
+            }
+            else if (cells.length >= 7) {
+                // Old format without Verification column - nothing to preserve
+            }
+        });
+        if (existingIndirectVerifications.size > 0) {
+            core.info(`📝 Preserved ${existingIndirectVerifications.size} custom indirect verification entries`);
+        }
+    }
+    catch (_a) {
+        // If parsing fails, continue with empty map
+    }
+};
+/**
  * Method to generate a header and intro for the SOUP register
  * @param packageJSONs TPackageJson[]: the contents of one or more package JSON to generate a unique list of names
+ * @param flagGplAsHighRisk boolean: whether GPL is flagged as high risk
  */
-const generateSoupHeader = (packageJSONs) => {
+const generateSoupHeader = (packageJSONs, flagGplAsHighRisk) => {
     const header = `# SOUP Register`;
     const dependenciesCount = getUniqueDependencies(packageJSONs).length;
+    const gplRiskNote = flagGplAsHighRisk
+        ? 'GPL/AGPL licenses (copyleft - may require source disclosure)'
+        : 'GPL/AGPL licenses are flagged as Medium risk';
     const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team.
 
 Risk levels are automatically calculated based on:
-- **Critical**: Package is deprecated, has known vulnerabilities, or repository is archived
-- **High**: Package is abandoned (>2 years without updates), has open security advisories, or is 2+ major versions behind latest
-- **Medium**: Low maintenance activity (>1 year without commits), 1 major version behind, or >1 minor versions behind
+- **Critical**: Package is deprecated, has known vulnerabilities, repository is archived, or has critical/high npm audit findings
+- **High**: Package is abandoned (>2 years without updates), has open security advisories, is 2+ major versions behind latest, or ${gplRiskNote}
+- **Medium**: Low maintenance activity (>1 year without commits), 1 major version behind, >1 minor versions behind, weak copyleft license (LGPL/MPL), unknown license, or integrity verification issues
 - **Low**: Passed all automated checks
+
+License categories:
+- **Permissive**: MIT, Apache-2.0, BSD-*, ISC (Low risk)
+- **Weak Copyleft**: MPL-2.0, LGPL-* (Medium risk)
+- **Strong Copyleft**: GPL-*, AGPL-* (${flagGplAsHighRisk ? 'High' : 'Medium'} risk)
 
 The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`;
     return `${header}\n\n${intro}\n\n`;
@@ -720,10 +1274,21 @@ The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`;
 const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* () {
     core.info(`📋 Starting SOUP generation`);
     const basePath = core.getInput('path');
+    const flagGplAsHighRisk = core.getInput('flag-gpl-as-high-risk') !== 'false';
     const rootPath = (0, node_path_1.join)(process.cwd(), basePath);
     const soupPath = (0, node_path_1.join)(rootPath, DEFAULT_SOUP_FILENAME);
     // Parse existing SOUP.md to preserve custom verifications
     parseExistingVerifications(soupPath);
+    parseExistingIndirectVerifications(soupPath);
+    // Run integrity checks (signature audit + lockfile hashes)
+    core.info(`🔐 Running integrity checks...`);
+    const integrityResult = runIntegrityChecks(rootPath);
+    if (integrityResult.invalidSignatures.size > 0) {
+        core.warning(`Found ${integrityResult.invalidSignatures.size} packages with invalid signatures`);
+    }
+    if (integrityResult.missingSignatures.size > 0) {
+        core.info(`Found ${integrityResult.missingSignatures.size} packages without signatures (lockfile hashes will be checked)`);
+    }
     // get array of package.json paths
     const packageJSONPaths = [];
     findFilesRecursive(rootPath, packageJSONPaths);
@@ -736,8 +1301,24 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     })
         // filter out package.json files without dependencies
         .filter((packageJSON) => !!packageJSON.dependencies);
+    // Collect all direct dependencies for audit classification
+    const directDeps = new Set();
+    packageJSONs.forEach((package_) => {
+        if (package_.dependencies) {
+            Object.keys(package_.dependencies).forEach((dep) => directDeps.add(dep));
+        }
+    });
+    // Run audit (yarn or npm depending on lockfile)
+    core.info(`🔍 Running security audit...`);
+    const { directVulns: auditVulns, indirectVulns } = runAudit(rootPath, directDeps);
+    if (auditVulns.size > 0) {
+        core.warning(`Found ${auditVulns.size} direct dependencies with audit findings`);
+    }
+    if (indirectVulns.length > 0) {
+        core.info(`Found ${indirectVulns.length} indirect/transitive vulnerabilities`);
+    }
     const repositorySoupRequests = [];
-    packageJSONs.forEach((packageJson) => repositorySoupRequests.push(getSoupDataForPackageCollection(packageJson)));
+    packageJSONs.forEach((packageJson) => repositorySoupRequests.push(getSoupDataForPackageCollection(packageJson, flagGplAsHighRisk, integrityResult, auditVulns)));
     const soupData = yield Promise.all(repositorySoupRequests);
     // Check for API failures before writing - don't override historic data with incomplete data
     if (apiFailures.length > 0) {
@@ -746,8 +1327,10 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
         core.setFailed('SOUP generation aborted due to API failures. Existing SOUP.md preserved to prevent data loss.');
         return;
     }
-    const soupHeader = generateSoupHeader(packageJSONs);
-    const soupRegister = soupHeader + soupData.join('\n\n');
+    const soupHeader = generateSoupHeader(packageJSONs, flagGplAsHighRisk);
+    // Generate indirect vulnerabilities section
+    const indirectSection = generateIndirectVulnerabilitiesSection(indirectVulns);
+    const soupRegister = soupHeader + soupData.join('\n\n') + indirectSection;
     core.info(`✅ SOUP data retrieved`);
     // Write SOUP file
     yield node_fs_1.default.writeFile(soupPath, soupRegister, { encoding: 'utf8', flag: 'w' }, (error) => {
@@ -12063,6 +12646,14 @@ module.exports = require("https");
 
 "use strict";
 module.exports = require("net");
+
+/***/ }),
+
+/***/ 7718:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:child_process");
 
 /***/ }),
 
