@@ -23,12 +23,12 @@ The action scans all `package.json` files (supporting monorepos) and generates a
 
 Each dependency is assigned a risk level based on automated checks:
 
-| Level | Triggers |
-|---|---|
-| **Critical** | Deprecated, known vulnerabilities, archived repo, critical/high audit findings |
-| **High** | Abandoned (>2yr no updates), open security advisories, 2+ major versions behind, strong copyleft license |
-| **Medium** | Low maintenance (>1yr no commits), 1 major or >1 minor versions behind, weak copyleft/unknown license, integrity issues |
-| **Low** | Passed all automated checks |
+| Level        | Triggers                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| **Critical** | Deprecated, known vulnerabilities, archived repo, critical/high audit findings                                          |
+| **High**     | Abandoned (>2yr no updates), open security advisories, 2+ major versions behind, strong copyleft license                |
+| **Medium**   | Low maintenance (>1yr no commits), 1 major or >1 minor versions behind, weak copyleft/unknown license, integrity issues |
+| **Low**      | Passed all automated checks                                                                                             |
 
 ### Verification Persistence
 
@@ -36,19 +36,19 @@ Custom verification notes written by developers in the `SOUP.md` Verification co
 
 ## Inputs
 
-| Input | Default | Description |
-|---|---|---|
-| `token` | `${{ github.token }}` | GitHub token for API access |
-| `flag-gpl-as-high-risk` | `'true'` | Treat GPL/AGPL licenses as High risk (relevant for proprietary medical devices) |
-| `create-pr` | `'false'` | Create or update a pull request with SOUP.md changes |
-| `pr-branch` | `'soup-register-update'` | Branch name for the SOUP update PR |
-| `pr-title` | `'chore: update SOUP register'` | Title for the pull request |
-| `pr-labels` | `''` | Comma-separated labels to apply (e.g. `'compliance,automated'`) |
+| Input                   | Default                         | Description                                                                     |
+| ----------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `token`                 | `${{ github.token }}`           | GitHub token for API access                                                     |
+| `flag-gpl-as-high-risk` | `'true'`                        | Treat GPL/AGPL licenses as High risk (relevant for proprietary medical devices) |
+| `create-pr`             | `'false'`                       | Create or update a pull request with SOUP.md changes                            |
+| `pr-branch`             | `'soup-register-update'`        | Branch name for the SOUP update PR                                              |
+| `pr-title`              | `'chore: update SOUP register'` | Title for the pull request                                                      |
+| `pr-labels`             | `''`                            | Comma-separated labels to apply (e.g. `'compliance,automated'`)                 |
 
 ## Outputs
 
-| Output | Description |
-|---|---|
+| Output   | Description                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------- |
 | `pr-url` | URL of the created or updated pull request (empty if `create-pr` is false or no changes detected) |
 
 ## Usage
@@ -111,6 +111,7 @@ jobs:
 ```
 
 When `create-pr` is enabled:
+
 - If `SOUP.md` has no changes, no PR is created
 - If a PR already exists for the branch, it is updated via force-push
 - The `pr-url` output contains the PR URL for use in downstream steps
