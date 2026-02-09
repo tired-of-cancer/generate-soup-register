@@ -40,6 +40,15 @@ jobs:
             const labels = pr.labels.map(l => l.name);
             const assignees = pr.assignees.map(a => a.login);
 
+            // Close original PR first — GitHub only allows one open PR per branch
+            await github.rest.issues.createComment({
+              issue_number: pr.number, owner, repo,
+              body: '🔄 Closing to recreate as TocBot for automated code review. A new PR will be linked shortly.'
+            });
+            await github.rest.pulls.update({
+              owner, repo, pull_number: pr.number, state: 'closed'
+            });
+
             // Create new PR as TocBot (TOC_BOT_PAT makes TocBot the author)
             const { data: newPr } = await github.rest.pulls.create({
               owner, repo,
@@ -56,6 +65,12 @@ jobs:
 
             core.info(`Created new PR #${newPr.number}`);
 
+            // Update the closing comment on the original PR with a link
+            await github.rest.issues.createComment({
+              issue_number: pr.number, owner, repo,
+              body: `➡️ Recreated as #${newPr.number}`
+            });
+
             // Copy labels
             if (labels.length > 0) {
               await github.rest.issues.addLabels({
@@ -69,15 +84,6 @@ jobs:
                 owner, repo, issue_number: newPr.number, assignees
               });
             }
-
-            // Close original PR with a reference to the new one
-            await github.rest.issues.createComment({
-              issue_number: pr.number, owner, repo,
-              body: `🔄 Recreated as #${newPr.number} to enable automated code review by bugbot.`
-            });
-            await github.rest.pulls.update({
-              owner, repo, pull_number: pr.number, state: 'closed'
-            });
 
             // Trigger bugbot on the new PR
             await github.rest.issues.createComment({
