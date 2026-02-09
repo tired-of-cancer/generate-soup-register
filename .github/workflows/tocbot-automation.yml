@@ -1,0 +1,36 @@
+name: TocBot Automation
+
+on:
+  pull_request:
+    types: [review_requested]
+
+jobs:
+  tocbot-automation:
+    if: |
+      (github.event.requested_reviewer && github.event.requested_reviewer.login == 'ToCbot') ||
+      (github.event.requested_reviewers && contains(github.event.requested_reviewers.*.login, 'ToCbot'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add "bugbot run" comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOC_BOT_PAT }}
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'bugbot run'
+            });
+
+      - name: Remove TocBot as reviewer
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOC_BOT_PAT }}
+          script: |
+            await github.rest.pulls.removeRequestedReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              reviewers: ['ToCbot']
+            });
