@@ -1732,9 +1732,9 @@ Risk levels are automatically calculated based on:
 - **Low**: Passed all automated checks
 
 License categories:
-- **Permissive**: MIT, Apache-2.0, BSD-*, ISC (Low risk)
-- **Weak Copyleft**: MPL-2.0, LGPL-* (Medium risk)
-- **Strong Copyleft**: GPL-*, AGPL-* (${
+- **Permissive**: MIT, Apache-2.0, BSD-\\*, ISC (Low risk)
+- **Weak Copyleft**: MPL-2.0, LGPL-\\* (Medium risk)
+- **Strong Copyleft**: GPL-\\*, AGPL-\\* (${
     flagGplAsHighRisk ? 'High' : 'Medium'
   } risk)
 

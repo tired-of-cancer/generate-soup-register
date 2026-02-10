@@ -1262,9 +1262,9 @@ Risk levels are automatically calculated based on:
 - **Low**: Passed all automated checks
 
 License categories:
-- **Permissive**: MIT, Apache-2.0, BSD-*, ISC (Low risk)
-- **Weak Copyleft**: MPL-2.0, LGPL-* (Medium risk)
-- **Strong Copyleft**: GPL-*, AGPL-* (${flagGplAsHighRisk ? 'High' : 'Medium'} risk)
+- **Permissive**: MIT, Apache-2.0, BSD-\\*, ISC (Low risk)
+- **Weak Copyleft**: MPL-2.0, LGPL-\\* (Medium risk)
+- **Strong Copyleft**: GPL-\\*, AGPL-\\* (${flagGplAsHighRisk ? 'High' : 'Medium'} risk)
 
 The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`;
     return `${header}\n\n${intro}\n\n`;

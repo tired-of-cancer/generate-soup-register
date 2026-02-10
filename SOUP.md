@@ -13,7 +13,7 @@ License categories:
 
 - **Permissive**: MIT, Apache-2.0, BSD-\*, ISC (Low risk)
 - **Weak Copyleft**: MPL-2.0, LGPL-\* (Medium risk)
-- **Strong Copyleft**: GPL-_, AGPL-_ (High risk)
+- **Strong Copyleft**: GPL-\*, AGPL-\* (High risk)
 
 The repository uses a total of 5 unique SOUP dependencies.
 
