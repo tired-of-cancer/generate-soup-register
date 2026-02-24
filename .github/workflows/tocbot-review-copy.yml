@@ -27,11 +27,12 @@ jobs:
             }
             const originalPrNumber = parseInt(match[1]);
 
-            // Fetch the original PR to get its HEAD sha (shadow branch has an
-            // extra empty commit, so we must use the original PR's own sha)
-            const { data: originalPr } = await github.rest.pulls.get({
-              owner, repo, pull_number: originalPrNumber
+            // The shadow branch HEAD is an empty commit on top of the original PR's HEAD
+            // at shadow creation time. Its parent is the exact code Bugbot reviewed.
+            const { data: shadowCommit } = await github.rest.git.getCommit({
+              owner, repo, commit_sha: shadowPr.head.sha
             });
+            const reviewedCommitSha = shadowCommit.parents[0].sha;
 
             // Collect all inline comments for this review
             const allComments = [];
@@ -78,6 +79,14 @@ jobs:
               return comment;
             });
 
+            // Safety: redirect comments that lack line positioning to file-level comments
+            const validInlineComments = inlineComments.filter(c => c.line);
+            const orphanedComments = inlineComments.filter(c => !c.line);
+            for (const orphan of orphanedComments) {
+              const original = reviewComments.find(c => c.path === orphan.path && c.body === orphan.body);
+              fileComments.push(original || { path: orphan.path, body: orphan.body });
+            }
+
             const reviewBody = [
               review.body || '',
               '',
@@ -85,15 +94,15 @@ jobs:
               `*Automated Bugbot review copied from shadow PR #${shadowPr.number} for #${originalPrNumber}*`
             ].join('\n');
 
-            if (inlineComments.length > 0) {
+            if (validInlineComments.length > 0) {
               // Post as a full review with inline comments
               await github.rest.pulls.createReview({
                 owner, repo,
                 pull_number: originalPrNumber,
-                commit_id: originalPr.head.sha,
+                commit_id: reviewedCommitSha,
                 body: reviewBody,
                 event: 'COMMENT',
-                comments: inlineComments
+                comments: validInlineComments
               });
             } else if (review.body) {
               // No inline comments, post review body as a PR comment
