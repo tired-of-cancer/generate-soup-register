@@ -435,6 +435,97 @@ const parseLockfileIntegrities = (rootPath: string): Set<string> => {
 }
 
 /**
+ * Parse lockfile to extract resolved versions for each package.
+ * Returns a map where keys are "name@specifier" and/or just "name",
+ * and values are the exact resolved version strings.
+ */
+const parseLockfileVersions = (rootPath: string): Map<string, string> => {
+  const versions = new Map<string, string>()
+
+  // Try yarn.lock first
+  const yarnLockPath = join(rootPath, 'yarn.lock')
+  if (fs.existsSync(yarnLockPath)) {
+    try {
+      const content = fs.readFileSync(yarnLockPath, 'utf8')
+      // Match entry headers and their resolved versions
+      // Handles: "package@range":  OR  package@range:  OR  "pkg@range1, pkg@range2":
+      const entryRegex = /^"?(.+?)"?:\n\s+version "(.+?)"/gm
+      ;[...content.matchAll(entryRegex)].forEach((match) => {
+        const resolvedVersion = match[2]
+        // Entry header can contain multiple specifiers: "semver@^7.3.7, semver@^7.3.8"
+        match[1]
+          .split(', ')
+          .map((s) => s.replaceAll(/^"|"$/g, ''))
+          .forEach((specifier) => {
+            versions.set(specifier, resolvedVersion)
+            // Also store by name alone (last wins, which is fine for direct deps)
+            const nameMatch = specifier.match(/^(@?[^@]+)@/)
+            if (nameMatch) {
+              versions.set(`${nameMatch[1]}@latest`, resolvedVersion)
+            }
+          })
+      })
+      return versions
+    } catch {
+      core.warning('Failed to parse yarn.lock for resolved versions')
+    }
+  }
+
+  // Try package-lock.json as fallback
+  const npmLockPath = join(rootPath, 'package-lock.json')
+  if (fs.existsSync(npmLockPath)) {
+    try {
+      const content = fs.readFileSync(npmLockPath, 'utf8')
+      const lockData = JSON.parse(content) as {
+        packages?: Record<string, { version?: string }>
+        dependencies?: Record<string, { version?: string }>
+      }
+
+      // npm lockfile v2/v3 format
+      if (lockData.packages) {
+        Object.entries(lockData.packages).forEach(([packagePath, data]) => {
+          if (data.version) {
+            const pathMatch = packagePath.match(/node_modules\/(.+)$/)
+            if (pathMatch) {
+              versions.set(pathMatch[1], data.version)
+            }
+          }
+        })
+      }
+
+      // npm lockfile v1 format
+      if (lockData.dependencies) {
+        Object.entries(lockData.dependencies).forEach(([name, data]) => {
+          if (data.version) {
+            versions.set(name, data.version)
+          }
+        })
+      }
+
+      return versions
+    } catch {
+      core.warning('Failed to parse package-lock.json for resolved versions')
+    }
+  }
+
+  return versions
+}
+
+/**
+ * Resolve a package version from the lockfile map.
+ * Tries "name@specifier" first (yarn.lock), then just "name" (package-lock.json).
+ * Falls back to stripping the range prefix if not found in lockfile.
+ */
+const resolveVersion = (
+  name: string,
+  specifier: string,
+  lockfileVersions: Map<string, string>
+): string =>
+  lockfileVersions.get(`${name}@${specifier}`) ??
+  lockfileVersions.get(name) ??
+  specifier.replaceAll(/[^\d.-]/g, '')
+
+/**
  * Run integrity checks (signature audit + lockfile hashes)
  * Returns combined integrity results, or empty results if checks unavailable
  */
@@ -1502,13 +1593,19 @@ const getSoupDataForPackageCollection = async (
   packageJSON: TPackageJson,
   flagGplAsHighRisk: boolean,
   integrityResult: TIntegrityResult,
-  auditVulns: Map<string, TNpmAuditVulnerability>
+  auditVulns: Map<string, TNpmAuditVulnerability>,
+  lockfileVersions: Map<string, string>
 ) => {
   const soupDataRequests = <Promise<TSoupData>[]>[]
 
   if (packageJSON.dependencies) {
     Object.entries(packageJSON.dependencies).forEach(
-      ([soupName, soupVersion]) =>
+      ([soupName, soupSpecifier]) => {
+        const soupVersion = resolveVersion(
+          soupName,
+          soupSpecifier,
+          lockfileVersions
+        )
         soupDataRequests.push(
           getSoupDataForPackage(
             soupName,
@@ -1518,6 +1615,7 @@ const getSoupDataForPackageCollection = async (
             auditVulns
           )
         )
+      }
     )
   }
 
@@ -1951,6 +2049,10 @@ const generateSoupRegister = async () => {
   parseExistingVerifications(soupPath)
   parseExistingIndirectVerifications(soupPath)
 
+  // Parse lockfile to resolve exact installed versions
+  core.info(`📦 Resolving package versions from lockfile...`)
+  const lockfileVersions = parseLockfileVersions(rootPath)
+
   // Run integrity checks (signature audit + lockfile hashes)
   core.info(`🔐 Running integrity checks...`)
   const integrityResult = runIntegrityChecks(rootPath)
@@ -2012,7 +2114,8 @@ const generateSoupRegister = async () => {
         packageJson,
         flagGplAsHighRisk,
         integrityResult,
-        auditVulns
+        auditVulns,
+        lockfileVersions
       )
     )
   )
