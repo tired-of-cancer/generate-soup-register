@@ -6,9 +6,7 @@ on:
 
 jobs:
   tocbot-automation:
-    if: |
-      (github.event.requested_reviewer && github.event.requested_reviewer.login == 'ToCbot') ||
-      (github.event.requested_reviewers && contains(github.event.requested_reviewers.*.login, 'ToCbot'))
+    if: github.event.requested_reviewer && github.event.requested_reviewer.login == 'ToCbot'
     runs-on: ubuntu-latest
     steps:
       - name: Create shadow branch and PR for Bugbot review
