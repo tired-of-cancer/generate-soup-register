@@ -1836,6 +1836,17 @@ License categories:
     flagGplAsHighRisk ? 'High' : 'Medium'
   } risk)
 
+### Handling "⚠️ Risk to be analysed"
+
+When a package is flagged with \`⚠️ Risk to be analysed\`, the project team must:
+
+1. **Review the risk details** listed in the Risk Details column to understand why the package was flagged
+2. **Assess the impact** on patient safety and the intended use of the medical device software
+3. **Decide on an action**: either accept the risk with justification, mitigate it (e.g. upgrade the package, replace it, or add compensating controls), or reject the dependency
+4. **Update the Verification column** by replacing the ⚠️ status with a note summarizing the decision (e.g. \`SOUP analysed and accepted by developer\` or \`Accepted: vulnerability is in unused code path, not reachable in our usage\`)
+
+Re-running the SOUP register generator will preserve your verification notes as long as the risk profile of the package has not changed. If a package's risk level or details change, the status will be updated to \`⚠️ Re-assess needed\` with a reference to your previous note.
+
 The repository uses a total of ${dependenciesCount} unique SOUP dependencies.`
 
   return `${header}\n\n${intro}\n\n`
