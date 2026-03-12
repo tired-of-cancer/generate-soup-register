@@ -1,0 +1,148 @@
+name: TocBot Review Copy
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  copy-review:
+    if: startsWith(github.event.pull_request.head.ref, 'shadow/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Copy review to original PR and clean up
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOC_BOT_PAT }}
+          script: |
+            const review = context.payload.review;
+            const shadowPr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Extract original PR number from shadow PR body
+            const match = shadowPr.body.match(/Shadow PR for #(\d+)/);
+            if (!match) {
+              core.setFailed('Could not find original PR number in shadow PR body');
+              return;
+            }
+            const originalPrNumber = parseInt(match[1]);
+
+            // The shadow branch HEAD is an empty commit on top of the original PR's HEAD
+            // at shadow creation time. Its parent is the exact code Bugbot reviewed.
+            const { data: shadowCommit } = await github.rest.git.getCommit({
+              owner, repo, commit_sha: shadowPr.head.sha
+            });
+            const reviewedCommitSha = shadowCommit.parents[0].sha;
+
+            // Collect all inline comments for this review
+            const allComments = [];
+            let page = 1;
+            while (true) {
+              const { data: comments } = await github.rest.pulls.listReviewComments({
+                owner, repo, pull_number: shadowPr.number, per_page: 100, page
+              });
+              if (comments.length === 0) break;
+              allComments.push(...comments);
+              page++;
+            }
+
+            const reviewComments = allComments.filter(
+              c => c.pull_request_review_id === review.id
+            );
+
+            core.info(`Found ${reviewComments.length} inline comments and review body: ${!!review.body}`);
+
+            // Separate file-level comments from line-level comments.
+            // The createReview API doesn't support subject_type or comments without line numbers,
+            // so file-level comments are posted as regular PR comments instead.
+            const fileComments = reviewComments.filter(c => c.subject_type === 'file');
+            const lineComments = reviewComments.filter(c => c.subject_type !== 'file');
+
+            const inlineComments = lineComments.map(c => {
+              const comment = {
+                path: c.path,
+                body: c.body,
+                side: c.side || 'RIGHT'
+              };
+
+              // Handle multi-line comments
+              if (c.start_line && c.start_line !== c.line) {
+                comment.start_line = c.start_line;
+                comment.start_side = c.start_side || c.side || 'RIGHT';
+                comment.line = c.line;
+              } else if (c.line) {
+                comment.line = c.line;
+              } else if (c.original_line) {
+                comment.line = c.original_line;
+              }
+
+              return comment;
+            });
+
+            // Safety: redirect comments that lack line positioning to file-level comments
+            const validInlineComments = inlineComments.filter(c => c.line);
+            const orphanedComments = inlineComments.filter(c => !c.line);
+            for (const orphan of orphanedComments) {
+              const original = reviewComments.find(c => c.path === orphan.path && c.body === orphan.body);
+              fileComments.push(original || { path: orphan.path, body: orphan.body });
+            }
+
+            const reviewBody = [
+              review.body || '',
+              '',
+              `---`,
+              `*Automated Bugbot review copied from shadow PR #${shadowPr.number} for #${originalPrNumber}*`
+            ].join('\n');
+
+            if (validInlineComments.length > 0) {
+              // Post as a full review with inline comments
+              await github.rest.pulls.createReview({
+                owner, repo,
+                pull_number: originalPrNumber,
+                commit_id: reviewedCommitSha,
+                body: reviewBody,
+                event: 'COMMENT',
+                comments: validInlineComments
+              });
+            } else if (review.body) {
+              // No inline comments, post review body as a PR comment
+              await github.rest.issues.createComment({
+                issue_number: originalPrNumber, owner, repo,
+                body: reviewBody
+              });
+            }
+
+            // Post file-level comments as regular PR comments (can't be part of createReview)
+            for (const fc of fileComments) {
+              await github.rest.issues.createComment({
+                issue_number: originalPrNumber, owner, repo,
+                body: `**${fc.path}**\n\n${fc.body}`
+              });
+            }
+
+            core.info(`Copied review to original PR #${originalPrNumber}`);
+
+            // Remove TocBot as reviewer on the original PR so it can be re-requested
+            try {
+              await github.rest.pulls.removeRequestedReviewers({
+                owner, repo, pull_number: originalPrNumber,
+                reviewers: ['ToCbot']
+              });
+            } catch (e) {
+              // TocBot may not be a requested reviewer, that's fine
+            }
+
+            // Close the shadow PR
+            await github.rest.pulls.update({
+              owner, repo, pull_number: shadowPr.number, state: 'closed'
+            });
+
+            // Delete the shadow branch
+            try {
+              await github.rest.git.deleteRef({
+                owner, repo, ref: `heads/${shadowPr.head.ref}`
+              });
+              core.info(`Deleted shadow branch ${shadowPr.head.ref}`);
+            } catch (e) {
+              core.warning(`Failed to delete shadow branch: ${e.message}`);
+            }

@@ -1,0 +1,96 @@
+name: TocBot Automation
+
+on:
+  pull_request:
+    types: [review_requested]
+
+jobs:
+  tocbot-automation:
+    if: github.event.requested_reviewer && github.event.requested_reviewer.login == 'ToCbot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create shadow branch and PR for Bugbot review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOC_BOT_PAT }}
+          script: |
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const originalPrNumber = pr.number;
+            const headBranch = pr.head.ref;
+            const baseBranch = pr.base.ref;
+            const headSha = pr.head.sha;
+            const shadowBranch = `shadow/${headBranch}`;
+
+            // If TocBot already authored the PR, just comment and remove reviewer
+            if (pr.user.login === 'ToCbot') {
+              await github.rest.issues.createComment({
+                issue_number: pr.number, owner, repo,
+                body: 'bugbot run'
+              });
+              await github.rest.pulls.removeRequestedReviewers({
+                owner, repo, pull_number: pr.number,
+                reviewers: ['ToCbot']
+              });
+              return;
+            }
+
+            // Clean up existing shadow PR and branch if they exist (e.g. re-triggered review)
+            const { data: existingPrs } = await github.rest.pulls.list({
+              owner, repo,
+              head: `${owner}:${shadowBranch}`,
+              state: 'open'
+            });
+            for (const existingPr of existingPrs) {
+              await github.rest.pulls.update({
+                owner, repo, pull_number: existingPr.number, state: 'closed'
+              });
+              core.info(`Closed existing shadow PR #${existingPr.number}`);
+            }
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${shadowBranch}` });
+              core.info(`Deleted existing shadow branch ${shadowBranch}`);
+            } catch (e) {
+              // Branch doesn't exist, that's fine
+            }
+
+            // Create shadow branch with an empty commit so it gets its own SHA.
+            // This prevents shadow PR check runs from overriding the original PR's statuses.
+            const { data: headCommit } = await github.rest.git.getCommit({
+              owner, repo, commit_sha: headSha
+            });
+            const { data: emptyCommit } = await github.rest.git.createCommit({
+              owner, repo,
+              message: `Shadow commit for Bugbot review of PR #${originalPrNumber}`,
+              tree: headCommit.tree.sha,
+              parents: [headSha]
+            });
+            await github.rest.git.createRef({
+              owner, repo,
+              ref: `refs/heads/${shadowBranch}`,
+              sha: emptyCommit.sha
+            });
+
+            // Create shadow PR as draft (TocBot is the author via PAT)
+            const { data: shadowPr } = await github.rest.pulls.create({
+              owner, repo,
+              title: `[Shadow] ${pr.title}`,
+              body: [
+                `Shadow PR for #${originalPrNumber}`,
+                '',
+                'This is an automated shadow PR for Bugbot review.',
+                '**Do not merge.** This PR will be cleaned up automatically.'
+              ].join('\n'),
+              head: shadowBranch,
+              base: baseBranch,
+              draft: true
+            });
+
+            core.info(`Created shadow PR #${shadowPr.number} for original PR #${originalPrNumber}`);
+
+            // Post "bugbot run" on the shadow PR to trigger the review
+            await github.rest.issues.createComment({
+              issue_number: shadowPr.number, owner, repo,
+              body: 'bugbot run'
+            });
