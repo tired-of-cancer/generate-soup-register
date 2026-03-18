@@ -11,3 +11,21 @@ inputs:
   token:
     description: 'GITHUB_TOKEN or a `repo` scoped Personal Access Token (PAT)'
     default: ${{ github.token }}
+  flag-gpl-as-high-risk:
+    description: 'Treat GPL/AGPL licenses as High risk (relevant for proprietary medical devices)'
+    default: 'true'
+  create-pr:
+    description: 'Create or update a pull request with SOUP.md changes instead of committing directly'
+    default: 'false'
+  pr-branch:
+    description: 'Branch name to use for the SOUP update PR'
+    default: 'soup-register-update'
+  pr-title:
+    description: 'Title for the SOUP update pull request'
+    default: 'chore: update SOUP register'
+  pr-labels:
+    description: 'Comma-separated labels to apply to the PR (e.g. "compliance,automated")'
+    default: ''
+outputs:
+  pr-url:
+    description: 'URL of the created or updated pull request (empty if create-pr is false or no changes)'
