@@ -1491,15 +1491,11 @@ const createOrUpdatePr = (soupPath, branchName, prTitle, prLabels, customPrBody)
     if (existingPrNumber) {
         core.info(`📝 Existing PR #${existingPrNumber} updated via force-push`);
         try {
-            yield octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', {
-                owner,
-                repo,
-                pull_number: existingPrNumber,
-                title: prTitle,
-            });
+            yield octokit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', Object.assign({ owner,
+                repo, pull_number: existingPrNumber, title: prTitle }, (customPrBody ? { body: customPrBody } : {})));
         }
         catch (error) {
-            core.warning(`Failed to update PR title: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            core.warning(`Failed to update PR: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         return `https://github.com/${owner}/${repo}/pull/${existingPrNumber}`;
     }

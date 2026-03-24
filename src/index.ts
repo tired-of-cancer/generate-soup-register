@@ -2027,10 +2027,11 @@ const createOrUpdatePr = async (
         repo,
         pull_number: existingPrNumber,
         title: prTitle,
+        ...(customPrBody ? { body: customPrBody } : {}),
       })
     } catch (error) {
       core.warning(
-        `Failed to update PR title: ${
+        `Failed to update PR: ${
           error instanceof Error ? error.message : 'Unknown error'
         }`
       )
