@@ -23,9 +23,15 @@ inputs:
   pr-title:
     description: 'Title for the SOUP update pull request'
     default: 'chore: update SOUP register'
+  pr-body:
+    description: 'Custom markdown body for the pull request. Falls back to a built-in default when not provided.'
+    default: ''
   pr-labels:
     description: 'Comma-separated labels to apply to the PR (e.g. "compliance,automated")'
     default: ''
+  format:
+    description: 'Run prettier on SOUP.md before committing'
+    default: 'true'
 outputs:
   pr-url:
     description: 'URL of the created or updated pull request (empty if create-pr is false or no changes)'
