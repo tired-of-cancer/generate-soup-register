@@ -395,107 +395,89 @@ const checkIntegrityStatus = (packageName, integrityResult) => {
     return undefined;
 };
 /**
- * Execute audit command and return stdout
- * Uses yarn audit if yarn.lock exists, otherwise npm audit
+ * Ensure a package-lock.json exists for npm audit.
+ * If one already exists, returns false (nothing to clean up).
+ * If not, generates a temporary one and returns true (caller must clean up).
+ *
+ * Note: `npm i --package-lock-only` rewrites yarn.lock resolved URLs as a
+ * side effect, so we restore yarn.lock via git checkout afterwards.
+ */
+const ensurePackageLock = (rootPath) => {
+    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
+    if (node_fs_1.default.existsSync(packageLockPath)) {
+        return false;
+    }
+    core.info('📦 No package-lock.json found — generating temporary lockfile for npm audit...');
+    try {
+        (0, node_child_process_1.execSync)('npm i --package-lock-only --ignore-scripts --legacy-peer-deps 2>/dev/null', {
+            cwd: rootPath,
+            encoding: 'utf8',
+            maxBuffer: 10 * 1024 * 1024,
+        });
+        return true;
+    }
+    catch (error) {
+        core.warning(`Failed to generate temporary package-lock.json: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        return false;
+    }
+    finally {
+        // Restore yarn.lock — npm i --package-lock-only rewrites resolved URLs
+        const yarnLockPath = (0, node_path_1.join)(rootPath, 'yarn.lock');
+        if (node_fs_1.default.existsSync(yarnLockPath)) {
+            try {
+                (0, node_child_process_1.execSync)('git checkout -- yarn.lock', {
+                    cwd: rootPath,
+                    encoding: 'utf8',
+                });
+            }
+            catch (_a) {
+                core.warning('Failed to restore yarn.lock after npm lockfile generation');
+            }
+        }
+    }
+};
+/**
+ * Remove the temporary package-lock.json if we created it
+ */
+const cleanupTemporaryPackageLock = (rootPath) => {
+    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
+    try {
+        node_fs_1.default.unlinkSync(packageLockPath);
+        core.info('🧹 Cleaned up temporary package-lock.json');
+    }
+    catch (_a) {
+        core.warning('Failed to clean up temporary package-lock.json');
+    }
+};
+/**
+ * Execute npm audit and return stdout.
+ * Generates a temporary package-lock.json if needed (e.g. yarn-only projects).
  */
 const executeAudit = (rootPath) => {
-    const hasYarnLock = node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'yarn.lock'));
-    const hasPackageLock = node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'package-lock.json'));
-    // Prefer yarn audit if yarn.lock exists
-    if (hasYarnLock) {
-        try {
-            const result = (0, node_child_process_1.execSync)('yarn audit --json 2>/dev/null', {
-                cwd: rootPath,
-                encoding: 'utf8',
-                maxBuffer: 10 * 1024 * 1024,
-            });
-            return { result, isYarn: true };
-        }
-        catch (error) {
-            // yarn audit exits with non-zero when vulnerabilities found
-            const execError = error;
-            if (execError.stdout) {
-                return { result: execError.stdout, isYarn: true };
-            }
-            // If yarn audit fails completely, fall through to npm if package-lock exists
-            if (!hasPackageLock) {
-                return { result: undefined, isYarn: true };
-            }
+    const createdTemporaryLockfile = ensurePackageLock(rootPath);
+    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
+    if (!node_fs_1.default.existsSync(packageLockPath)) {
+        return { result: undefined, createdTempLockfile: false };
+    }
+    try {
+        const result = (0, node_child_process_1.execSync)('npm audit --json 2>/dev/null', {
+            cwd: rootPath,
+            encoding: 'utf8',
+            maxBuffer: 10 * 1024 * 1024,
+        });
+        return { result, createdTempLockfile: createdTemporaryLockfile };
+    }
+    catch (error) {
+        // npm audit exits with non-zero when vulnerabilities are found
+        const execError = error;
+        if (execError.stdout) {
+            return {
+                result: execError.stdout,
+                createdTempLockfile: createdTemporaryLockfile,
+            };
         }
     }
-    // Fall back to npm audit
-    if (hasPackageLock) {
-        try {
-            const result = (0, node_child_process_1.execSync)('npm audit --json 2>/dev/null', {
-                cwd: rootPath,
-                encoding: 'utf8',
-                maxBuffer: 10 * 1024 * 1024,
-            });
-            return { result, isYarn: false };
-        }
-        catch (error) {
-            const execError = error;
-            if (execError.stdout) {
-                return { result: execError.stdout, isYarn: false };
-            }
-        }
-    }
-    return { result: undefined, isYarn: hasYarnLock };
-};
-const parseYarnAuditOutput = (result, directDeps) => {
-    const directVulns = new Map();
-    const indirectVulns = [];
-    // Yarn outputs newline-delimited JSON
-    const lines = result.split('\n').filter((line) => line.trim());
-    lines.forEach((line) => {
-        var _a, _b;
-        try {
-            const parsed = JSON.parse(line);
-            if (parsed.type === 'auditAdvisory') {
-                const advisory = parsed;
-                const { module_name: name, severity, url, recommendation, findings, } = advisory.data.advisory;
-                const { path: depPath, dev, id: resolutionId, } = advisory.data.resolution;
-                // Extract version from findings
-                const version = ((_a = findings === null || findings === void 0 ? void 0 : findings[0]) === null || _a === void 0 ? void 0 : _a.version) || 'unknown';
-                // Check if this is a direct dependency
-                const isDirect = directDeps.has(name);
-                if (isDirect) {
-                    // Create a compatible structure for direct vulnerabilities
-                    if (!directVulns.has(name)) {
-                        directVulns.set(name, {
-                            name,
-                            severity: severity,
-                            isDirect: true,
-                            via: [{ source: resolutionId, name, url }],
-                            effects: [],
-                            range: '*',
-                            fixAvailable: !!recommendation,
-                        });
-                    }
-                }
-                else {
-                    // Indirect/transitive vulnerability
-                    const vulnPath = depPath || `(transitive) > ${name}`;
-                    const key = `${name}|${version}|${vulnPath}`;
-                    const existing = existingIndirectVerifications.get(key);
-                    indirectVulns.push({
-                        name,
-                        version,
-                        severity,
-                        advisory: url || 'See yarn audit',
-                        recommendation: recommendation || 'Check for updates',
-                        type: dev ? 'Dev' : 'Transitive',
-                        dependencyPath: vulnPath,
-                        verification: (_b = existing === null || existing === void 0 ? void 0 : existing.verification) !== null && _b !== void 0 ? _b : DEFAULT_VERIFICATION_RISK,
-                    });
-                }
-            }
-        }
-        catch (_c) {
-            // Skip unparseable lines
-        }
-    });
-    return { directVulns, indirectVulns };
+    return { result: undefined, createdTempLockfile: createdTemporaryLockfile };
 };
 /**
  * Parse npm audit JSON output
@@ -550,31 +532,32 @@ const parseNpmAuditOutput = (result) => {
     return { directVulns, indirectVulns };
 };
 /**
- * Run audit and parse results
- * Uses yarn audit if yarn.lock exists, otherwise npm audit
- * Returns vulnerability data for direct and indirect dependencies
+ * Run npm audit and parse results.
+ * Generates a temporary package-lock.json if needed (e.g. yarn-only projects)
+ * and cleans it up afterwards.
+ * Returns vulnerability data for direct and indirect dependencies.
  */
-const runAudit = (rootPath, directDeps) => {
-    const { result, isYarn } = executeAudit(rootPath);
-    if (!result) {
-        core.warning(`${isYarn ? 'yarn' : 'npm'} audit failed - continuing without audit data`);
-        return {
-            directVulns: new Map(),
-            indirectVulns: [],
-        };
-    }
+const runAudit = (rootPath) => {
+    const emptyResult = {
+        directVulns: new Map(),
+        indirectVulns: [],
+    };
+    const { result, createdTempLockfile } = executeAudit(rootPath);
     try {
-        if (isYarn) {
-            return parseYarnAuditOutput(result, directDeps);
+        if (!result) {
+            core.warning('npm audit failed - continuing without audit data');
+            return emptyResult;
         }
         return parseNpmAuditOutput(result);
     }
     catch (error) {
-        core.warning(`${isYarn ? 'yarn' : 'npm'} audit parse failed: ${error instanceof Error ? error.message : 'Unknown error'} - continuing without audit data`);
-        return {
-            directVulns: new Map(),
-            indirectVulns: [],
-        };
+        core.warning(`npm audit parse failed: ${error instanceof Error ? error.message : 'Unknown error'} - continuing without audit data`);
+        return emptyResult;
+    }
+    finally {
+        if (createdTempLockfile) {
+            cleanupTemporaryPackageLock(rootPath);
+        }
     }
 };
 /**
@@ -1576,16 +1559,9 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     })
         // filter out package.json files without dependencies
         .filter((packageJSON) => !!packageJSON.dependencies);
-    // Collect all direct dependencies for audit classification
-    const directDeps = new Set();
-    packageJSONs.forEach((package_) => {
-        if (package_.dependencies) {
-            Object.keys(package_.dependencies).forEach((dep) => directDeps.add(dep));
-        }
-    });
-    // Run audit (yarn or npm depending on lockfile)
+    // Run npm audit (generates temporary package-lock.json if needed)
     core.info(`🔍 Running security audit...`);
-    const { directVulns: auditVulns, indirectVulns } = runAudit(rootPath, directDeps);
+    const { directVulns: auditVulns, indirectVulns } = runAudit(rootPath);
     if (auditVulns.size > 0) {
         core.warning(`Found ${auditVulns.size} direct dependencies with audit findings`);
     }
