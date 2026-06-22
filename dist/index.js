@@ -1187,7 +1187,16 @@ const parseExistingVerifications = (soupPath) => {
         return;
     try {
         const content = node_fs_1.default.readFileSync(soupPath, 'utf8');
-        const lines = content.split('\n');
+        // Only parse the main dependency table(s). The "Indirect and Development
+        // Dependencies" table is preserved separately (parseExistingIndirectVerifications)
+        // and reuses package names; without this scope a package listed in both tables
+        // (e.g. lodash) has its main-table note and version clobbered by the transitive
+        // row, which then trips a phantom "Re-assess needed" on every regeneration.
+        const indirectSectionStart = content.indexOf('## Indirect and Development Dependencies');
+        const mainContent = indirectSectionStart === -1
+            ? content
+            : content.slice(0, indirectSectionStart);
+        const lines = mainContent.split('\n');
         // Filter to table data rows and extract verifications
         // Skip separator rows (---) and header row (Package Name)
         lines
