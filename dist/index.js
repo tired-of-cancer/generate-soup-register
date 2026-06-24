@@ -90,6 +90,29 @@ const trackApiFailure = (source, packageName, error) => {
     apiFailures.push(message);
     core.warning(message);
 };
+/**
+ * Split a markdown table row into its cell values.
+ *
+ * Splits on unescaped pipes only and unescapes `\|` back to `|`, so a custom
+ * verification note containing a pipe (which prettier escapes to `\|`) survives
+ * a parse/regenerate round-trip instead of shifting every column. The leading
+ * and trailing boundary pipes are stripped first, and interior empty cells are
+ * preserved so column indices stay stable.
+ * @param line string: a single `| a | b | ... |` table row
+ */
+const parseTableRow = (line) => line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replaceAll('\\|', '|'));
+/**
+ * Escape a value for safe inclusion in a markdown table cell. Mirrors prettier's
+ * handling (`|` → `\|`) so verification notes containing pipes stay well-formed
+ * even when the `format` input disables the prettier pass.
+ * @param value string: raw cell text
+ */
+const escapeTableCell = (value) => value.replaceAll('|', '\\|');
 node_readline_1.default.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -588,7 +611,7 @@ The following vulnerabilities were found in transitive or development dependenci
 |---------|---------|-----------------|----------|----------|----------------|------|--------------|
 `;
     const rows = vulns
-        .map((v) => `| ${v.name} | ${v.version} | ${v.dependencyPath} | ${v.severity} | ${v.advisory} | ${v.recommendation} | ${v.type} | ${v.verification} |`)
+        .map((v) => `| ${v.name} | ${v.version} | ${v.dependencyPath} | ${v.severity} | ${v.advisory} | ${v.recommendation} | ${v.type} | ${escapeTableCell(v.verification)} |`)
         .join('\n');
     return `\n\n${header}${rows}`;
 };
@@ -1114,7 +1137,7 @@ const generateSoupTable = (soupData) => {
     const tableHeader = '| Package Name | Programming Languages | Website | License | Version | Risk Level | Risk Details | Verification |\n|---|---|---|---|---|---|---|---|\n';
     const tableContents = [];
     soupData.forEach((data) => {
-        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupLicense} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${data.soupVerification} |`);
+        tableContents.push(`| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupLicense} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${escapeTableCell(data.soupVerification)} |`);
     });
     return tableHeader + tableContents.sort().join('\n');
 };
@@ -1204,10 +1227,7 @@ const parseExistingVerifications = (soupPath) => {
             !line.includes('---') &&
             !line.includes('Package Name'))
             .forEach((line) => {
-            const cells = line
-                .split('|')
-                .map((cell) => cell.trim())
-                .filter((cell) => cell.length > 0);
+            const cells = parseTableRow(line);
             // Table has 8 columns: Name, Languages, Website, License, Version, Risk Level, Risk Details, Verification
             // Also support old 7-column format for backwards compatibility
             if (cells.length >= 8) {
@@ -1283,10 +1303,7 @@ const parseExistingIndirectVerifications = (soupPath) => {
             !line.includes('---') &&
             !line.includes('Package'))
             .forEach((line) => {
-            const cells = line
-                .split('|')
-                .map((cell) => cell.trim())
-                .filter((cell) => cell.length > 0);
+            const cells = parseTableRow(line);
             // Table has 8 columns: Package, Version, Dependency Path, Severity,
             // Advisory, Recommendation, Type, Verification
             if (cells.length >= 8) {
