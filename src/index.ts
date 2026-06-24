@@ -74,6 +74,32 @@ const trackApiFailure = (
   core.warning(message)
 }
 
+/**
+ * Split a markdown table row into its cell values.
+ *
+ * Splits on unescaped pipes only and unescapes `\|` back to `|`, so a custom
+ * verification note containing a pipe (which prettier escapes to `\|`) survives
+ * a parse/regenerate round-trip instead of shifting every column. The leading
+ * and trailing boundary pipes are stripped first, and interior empty cells are
+ * preserved so column indices stay stable.
+ * @param line string: a single `| a | b | ... |` table row
+ */
+const parseTableRow = (line: string): string[] =>
+  line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replaceAll('\\|', '|'))
+
+/**
+ * Escape a value for safe inclusion in a markdown table cell. Mirrors prettier's
+ * handling (`|` → `\|`) so verification notes containing pipes stay well-formed
+ * even when the `format` input disables the prettier pass.
+ * @param value string: raw cell text
+ */
+const escapeTableCell = (value: string): string => value.replaceAll('|', '\\|')
+
 type TPackageJson = {
   name: string
   dependencies?: { [key: string]: string }
@@ -802,7 +828,11 @@ The following vulnerabilities were found in transitive or development dependenci
   const rows = vulns
     .map(
       (v) =>
-        `| ${v.name} | ${v.version} | ${v.dependencyPath} | ${v.severity} | ${v.advisory} | ${v.recommendation} | ${v.type} | ${v.verification} |`
+        `| ${v.name} | ${v.version} | ${v.dependencyPath} | ${v.severity} | ${
+          v.advisory
+        } | ${v.recommendation} | ${v.type} | ${escapeTableCell(
+          v.verification
+        )} |`
     )
     .join('\n')
 
@@ -1497,7 +1527,11 @@ const generateSoupTable = (soupData: TSoupData[]) => {
   const tableContents: string[] = []
   soupData.forEach((data) => {
     tableContents.push(
-      `| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${data.soupLicense} | ${data.soupVersion} | ${data.soupRiskLevel} | ${data.soupRiskDetails} | ${data.soupVerification} |`
+      `| ${data.soupName} | ${data.soupLanguages} | ${data.soupSite} | ${
+        data.soupLicense
+      } | ${data.soupVersion} | ${data.soupRiskLevel} | ${
+        data.soupRiskDetails
+      } | ${escapeTableCell(data.soupVerification)} |`
     )
   })
   return tableHeader + tableContents.sort().join('\n')
@@ -1601,7 +1635,20 @@ const parseExistingVerifications = (soupPath: string) => {
 
   try {
     const content = fs.readFileSync(soupPath, 'utf8')
-    const lines = content.split('\n')
+
+    // Only parse the main dependency table(s). The "Indirect and Development
+    // Dependencies" table is preserved separately (parseExistingIndirectVerifications)
+    // and reuses package names; without this scope a package listed in both tables
+    // (e.g. lodash) has its main-table note and version clobbered by the transitive
+    // row, which then trips a phantom "Re-assess needed" on every regeneration.
+    const indirectSectionStart = content.indexOf(
+      '## Indirect and Development Dependencies'
+    )
+    const mainContent =
+      indirectSectionStart === -1
+        ? content
+        : content.slice(0, indirectSectionStart)
+    const lines = mainContent.split('\n')
 
     // Filter to table data rows and extract verifications
     // Skip separator rows (---) and header row (Package Name)
@@ -1613,10 +1660,7 @@ const parseExistingVerifications = (soupPath: string) => {
           !line.includes('Package Name')
       )
       .forEach((line) => {
-        const cells = line
-          .split('|')
-          .map((cell) => cell.trim())
-          .filter((cell) => cell.length > 0)
+        const cells = parseTableRow(line)
 
         // Table has 8 columns: Name, Languages, Website, License, Version, Risk Level, Risk Details, Verification
         // Also support old 7-column format for backwards compatibility
@@ -1709,10 +1753,7 @@ const parseExistingIndirectVerifications = (soupPath: string) => {
           !line.includes('Package')
       )
       .forEach((line) => {
-        const cells = line
-          .split('|')
-          .map((cell) => cell.trim())
-          .filter((cell) => cell.length > 0)
+        const cells = parseTableRow(line)
 
         // Table has 8 columns: Package, Version, Dependency Path, Severity,
         // Advisory, Recommendation, Type, Verification
