@@ -418,89 +418,21 @@ const checkIntegrityStatus = (packageName, integrityResult) => {
     return undefined;
 };
 /**
- * Ensure a package-lock.json exists for npm audit.
- * If one already exists, returns false (nothing to clean up).
- * If not, generates a temporary one and returns true (caller must clean up).
- *
- * Note: `npm i --package-lock-only` rewrites yarn.lock resolved URLs as a
- * side effect, so we restore yarn.lock via git checkout afterwards.
+ * Execute npm audit against the project's package-lock.json and return stdout.
  */
-const ensurePackageLock = (rootPath) => {
-    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
-    if (node_fs_1.default.existsSync(packageLockPath)) {
-        return false;
-    }
-    core.info('📦 No package-lock.json found — generating temporary lockfile for npm audit...');
+const executeNpmAudit = (rootPath) => {
     try {
-        (0, node_child_process_1.execSync)('npm i --package-lock-only --ignore-scripts --legacy-peer-deps 2>/dev/null', {
+        return (0, node_child_process_1.execSync)('npm audit --json 2>/dev/null', {
             cwd: rootPath,
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
         });
-        return true;
-    }
-    catch (error) {
-        core.warning(`Failed to generate temporary package-lock.json: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        return false;
-    }
-    finally {
-        // Restore yarn.lock — npm i --package-lock-only rewrites resolved URLs
-        const yarnLockPath = (0, node_path_1.join)(rootPath, 'yarn.lock');
-        if (node_fs_1.default.existsSync(yarnLockPath)) {
-            try {
-                (0, node_child_process_1.execSync)('git checkout -- yarn.lock', {
-                    cwd: rootPath,
-                    encoding: 'utf8',
-                });
-            }
-            catch (_a) {
-                core.warning('Failed to restore yarn.lock after npm lockfile generation');
-            }
-        }
-    }
-};
-/**
- * Remove the temporary package-lock.json if we created it
- */
-const cleanupTemporaryPackageLock = (rootPath) => {
-    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
-    try {
-        node_fs_1.default.unlinkSync(packageLockPath);
-        core.info('🧹 Cleaned up temporary package-lock.json');
-    }
-    catch (_a) {
-        core.warning('Failed to clean up temporary package-lock.json');
-    }
-};
-/**
- * Execute npm audit and return stdout.
- * Generates a temporary package-lock.json if needed (e.g. yarn-only projects).
- */
-const executeAudit = (rootPath) => {
-    const createdTemporaryLockfile = ensurePackageLock(rootPath);
-    const packageLockPath = (0, node_path_1.join)(rootPath, 'package-lock.json');
-    if (!node_fs_1.default.existsSync(packageLockPath)) {
-        return { result: undefined, createdTempLockfile: false };
-    }
-    try {
-        const result = (0, node_child_process_1.execSync)('npm audit --json 2>/dev/null', {
-            cwd: rootPath,
-            encoding: 'utf8',
-            maxBuffer: 10 * 1024 * 1024,
-        });
-        return { result, createdTempLockfile: createdTemporaryLockfile };
     }
     catch (error) {
         // npm audit exits with non-zero when vulnerabilities are found
         const execError = error;
-        if (execError.stdout) {
-            return {
-                result: execError.stdout,
-                createdTempLockfile: createdTemporaryLockfile,
-            };
-        }
+        return execError.stdout || undefined;
     }
-    return { result: undefined, createdTempLockfile: createdTemporaryLockfile };
 };
 /**
  * Parse npm audit JSON output
@@ -554,37 +486,29 @@ const parseNpmAuditOutput = (result) => {
     }
     return { directVulns, indirectVulns };
 };
+const emptyAuditResult = () => ({
+    directVulns: new Map(),
+    indirectVulns: [],
+});
 /**
- * Run npm audit and parse results.
- * Generates a temporary package-lock.json if needed (e.g. yarn-only projects)
- * and cleans it up afterwards.
- * Returns vulnerability data for direct and indirect dependencies.
+ * Run npm audit on a project that ships a package-lock.json.
  */
-const runAudit = (rootPath) => {
-    const emptyResult = {
-        directVulns: new Map(),
-        indirectVulns: [],
-    };
-    const { result, createdTempLockfile } = executeAudit(rootPath);
+const runNpmAudit = (rootPath) => {
+    const result = executeNpmAudit(rootPath);
+    if (!result) {
+        core.warning('npm audit failed - continuing without audit data');
+        return emptyAuditResult();
+    }
     try {
-        if (!result) {
-            core.warning('npm audit failed - continuing without audit data');
-            return emptyResult;
-        }
         return parseNpmAuditOutput(result);
     }
     catch (error) {
         core.warning(`npm audit parse failed: ${error instanceof Error ? error.message : 'Unknown error'} - continuing without audit data`);
-        return emptyResult;
-    }
-    finally {
-        if (createdTempLockfile) {
-            cleanupTemporaryPackageLock(rootPath);
-        }
+        return emptyAuditResult();
     }
 };
 /**
- * Format npm audit findings for a direct dependency
+ * Format security audit findings for a direct dependency
  */
 const formatAuditFinding = (vuln) => {
     var _a;
@@ -595,7 +519,7 @@ const formatAuditFinding = (vuln) => {
         low: 'Low',
         info: 'Info',
     };
-    return `npm audit: ${(_a = severityMap[vuln.severity]) !== null && _a !== void 0 ? _a : vuln.severity} severity`;
+    return `Security audit: ${(_a = severityMap[vuln.severity]) !== null && _a !== void 0 ? _a : vuln.severity} severity`;
 };
 /**
  * Generate markdown section for indirect/dev vulnerabilities
@@ -876,14 +800,18 @@ const isVersionAffectedByAdvisory = (version, vulnerableRange) => {
     var _a;
     if (!vulnerableRange)
         return true; // No range specified, assume affected
-    const normalizedVersion = (_a = (0, semver_1.coerce)(version)) === null || _a === void 0 ? void 0 : _a.version;
+    const normalizedVersion = (_a = (0, semver_1.coerce)(version, {
+        includePrerelease: true,
+    })) === null || _a === void 0 ? void 0 : _a.version;
     if (!normalizedVersion)
         return true; // Can't parse, assume affected
     try {
         // Convert GitHub format to semver format
         // GitHub uses ", " to separate conditions, semver uses " "
         const semverRange = vulnerableRange.replaceAll(/,\s*/g, ' ');
-        return (0, semver_1.satisfies)(normalizedVersion, semverRange);
+        return (0, semver_1.satisfies)(normalizedVersion, semverRange, {
+            includePrerelease: true,
+        });
     }
     catch (_b) {
         // Invalid range, assume affected
@@ -891,13 +819,314 @@ const isVersionAffectedByAdvisory = (version, vulnerableRange) => {
     }
 };
 /**
+ * Resolve the package name of a yarn.lock specifier such as
+ * `@scope/name@^1.0.0`, or the real name behind an alias such as
+ * `alias@npm:real-name@^1.0.0`.
+ */
+const getYarnSpecifierName = (specifier) => {
+    var _a;
+    const match = specifier.match(/^(@?[^@]+)@(.*)$/);
+    if (!match)
+        return undefined;
+    if (match[2].startsWith('npm:')) {
+        return (_a = getYarnSpecifierName(match[2].slice(4))) !== null && _a !== void 0 ? _a : match[1];
+    }
+    return match[1];
+};
+/**
+ * Parse a yarn.lock (v1) into its installed packages and the dependencies
+ * each one declares, so a vulnerable package can be traced to a dependent.
+ */
+const parseYarnLockEntries = (content) => {
+    const entries = [];
+    let current;
+    let inDependencyBlock = false;
+    content.split('\n').forEach((line) => {
+        var _a;
+        if (line.startsWith('#') || line.trim() === '')
+            return;
+        if (!line.startsWith(' ')) {
+            // Entry header, e.g. `"semver@^7.3.7", "semver@^7.3.8":` — every
+            // specifier resolves to the same package, so the first one names it
+            const firstSpecifier = line
+                .replace(/:\s*$/, '')
+                .split(', ')[0]
+                .replaceAll(/^"|"$/g, '');
+            const name = getYarnSpecifierName(firstSpecifier);
+            current = name ? { name, version: '', dependencies: [] } : undefined;
+            if (current)
+                entries.push(current);
+            inDependencyBlock = false;
+            return;
+        }
+        if (!current)
+            return;
+        if (line.startsWith('    ')) {
+            // Nested line of a dependency block, e.g. `    braces "^3.0.3"`
+            if (!inDependencyBlock)
+                return;
+            const match = line.trim().match(/^"?([^\s"]+)"?\s+"?(.*?)"?$/);
+            if (!match)
+                return;
+            const dependencyName = match[2].startsWith('npm:')
+                ? (_a = getYarnSpecifierName(match[2].slice(4))) !== null && _a !== void 0 ? _a : match[1]
+                : match[1];
+            current.dependencies.push(dependencyName);
+            return;
+        }
+        const property = line.trim();
+        const versionMatch = property.match(/^version "(.+)"$/);
+        if (versionMatch) {
+            const [, version] = versionMatch;
+            current.version = version;
+        }
+        inDependencyBlock =
+            property === 'dependencies:' || property === 'optionalDependencies:';
+    });
+    return entries.filter((entry) => entry.version !== '');
+};
+const NPM_BULK_ADVISORY_URL = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk';
+/**
+ * Fetch the advisories for every installed version in one request from the
+ * npm advisory database, the same source `npm audit` queries.
+ * Returns undefined after recording an API failure.
+ */
+const fetchNpmAdvisories = (versionsByName) => __awaiter(void 0, void 0, void 0, function* () {
+    const body = {};
+    versionsByName.forEach((versions, name) => {
+        body[name] = [...versions];
+    });
+    try {
+        const response = yield (0, node_fetch_1.default)(NPM_BULK_ADVISORY_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+            trackApiFailure('npm advisory API', 'yarn.lock', new Error(`HTTP ${response.status}`));
+            return undefined;
+        }
+        const data = yield response.json();
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            trackApiFailure('npm advisory API', 'yarn.lock', new Error('Unexpected response shape'));
+            return undefined;
+        }
+        return data;
+    }
+    catch (error) {
+        trackApiFailure('npm advisory API', 'yarn.lock', error);
+        return undefined;
+    }
+});
+const SEVERITY_ORDER = [
+    'info',
+    'low',
+    'moderate',
+    'high',
+    'critical',
+];
+const getHighestSeverity = (advisories) => {
+    const highestIndex = Math.max(0, ...advisories.map((advisory) => SEVERITY_ORDER.indexOf(advisory.severity)));
+    return SEVERITY_ORDER[highestIndex];
+};
+// GitHub advisory lookups, cached so each advisory is fetched once per run
+const gitHubAdvisoryCache = new Map();
+const fetchGitHubAdvisory = (ghsaId) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const response = yield octokit.request('GET /advisories/{ghsa_id}', {
+            ghsa_id: ghsaId,
+        });
+        return response.data;
+    }
+    catch (error) {
+        // 404 means the advisory was withdrawn or is unknown to GitHub
+        const { status } = error;
+        if (status !== 404) {
+            trackApiFailure('GitHub Advisories API', ghsaId, error);
+        }
+        return undefined;
+    }
+});
+const getGitHubAdvisory = (ghsaId) => {
+    const cached = gitHubAdvisoryCache.get(ghsaId);
+    if (cached)
+        return cached;
+    const request = fetchGitHubAdvisory(ghsaId);
+    gitHubAdvisoryCache.set(ghsaId, request);
+    return request;
+};
+/**
+ * Determine whether a fix exists for an advisory as it applies to the
+ * installed version, from the GitHub advisory's first patched version.
+ */
+const getPatchStatus = (advisory, packageName, version) => __awaiter(void 0, void 0, void 0, function* () {
+    var _f, _g;
+    const [ghsaId] = (_f = advisory.url.match(/GHSA-[\w-]+$/)) !== null && _f !== void 0 ? _f : [];
+    if (!ghsaId)
+        return { kind: 'unknown' };
+    const gitHubAdvisory = yield getGitHubAdvisory(ghsaId);
+    const vulnerability = (_g = gitHubAdvisory === null || gitHubAdvisory === void 0 ? void 0 : gitHubAdvisory.vulnerabilities) === null || _g === void 0 ? void 0 : _g.find((vuln) => {
+        var _a, _b;
+        return (!((_a = vuln.package) === null || _a === void 0 ? void 0 : _a.ecosystem) || vuln.package.ecosystem === 'npm') &&
+            ((_b = vuln.package) === null || _b === void 0 ? void 0 : _b.name) === packageName &&
+            isVersionAffectedByAdvisory(version, vuln.vulnerable_version_range);
+    });
+    if (!vulnerability)
+        return { kind: 'unknown' };
+    return vulnerability.first_patched_version
+        ? { kind: 'patched', version: vulnerability.first_patched_version }
+        : { kind: 'unpatched' };
+});
+const compareVersions = (a, b) => {
+    try {
+        return (0, semver_1.compare)(a, b);
+    }
+    catch (_a) {
+        return a.localeCompare(b);
+    }
+};
+/**
+ * Build the recommendation for a vulnerable installed version: the lowest
+ * version that fixes every advisory affecting it, or a note that no fix
+ * exists yet.
+ */
+const buildRecommendation = (packageName, patchStatuses) => {
+    if (patchStatuses.some((status) => status.kind === 'unpatched')) {
+        return 'No patched version available';
+    }
+    const patchedVersions = patchStatuses
+        .filter((status) => status.kind === 'patched')
+        .map((status) => status.version);
+    if (patchedVersions.length !== patchStatuses.length)
+        return 'See advisory';
+    const [highest] = patchedVersions.sort((a, b) => compareVersions(b, a));
+    return `Upgrade ${packageName} to >= ${highest}`;
+};
+/**
+ * Resolve the exact installed version of every direct dependency of the given
+ * kind across all package.json files, keyed by package name.
+ */
+const getDirectDependencyVersions = (packageJSONs, kind, lockfileVersions) => {
+    const versionsByName = new Map();
+    packageJSONs.forEach((packageJSON) => {
+        var _a;
+        Object.entries((_a = packageJSON[kind]) !== null && _a !== void 0 ? _a : {}).forEach(([name, specifier]) => {
+            var _a;
+            const version = resolveVersion(name, specifier, lockfileVersions);
+            versionsByName.set(name, ((_a = versionsByName.get(name)) !== null && _a !== void 0 ? _a : new Set()).add(version));
+        });
+    });
+    return versionsByName;
+};
+/**
+ * Audit every package version installed through yarn.lock against the npm
+ * advisory database. Vulnerable direct runtime dependencies feed the main
+ * tables; dev and transitive findings go to the indirect section, traced to
+ * the dependent that pulls them in.
+ */
+const runYarnLockAudit = (rootPath, direct) => __awaiter(void 0, void 0, void 0, function* () {
+    const result = emptyAuditResult();
+    const entries = parseYarnLockEntries(node_fs_1.default.readFileSync((0, node_path_1.join)(rootPath, 'yarn.lock'), 'utf8'));
+    const versionsByName = new Map();
+    const dependentsByName = new Map();
+    entries.forEach((entry) => {
+        var _a;
+        versionsByName.set(entry.name, ((_a = versionsByName.get(entry.name)) !== null && _a !== void 0 ? _a : new Set()).add(entry.version));
+        entry.dependencies.forEach((dependency) => {
+            var _a;
+            dependentsByName.set(dependency, ((_a = dependentsByName.get(dependency)) !== null && _a !== void 0 ? _a : new Set()).add(entry.name));
+        });
+    });
+    if (versionsByName.size === 0) {
+        trackApiFailure('yarn.lock audit', 'yarn.lock', new Error('No packages found - only yarn v1 lockfiles are supported'));
+        return result;
+    }
+    core.info(`📦 Auditing ${versionsByName.size} packages from yarn.lock against the npm advisory database...`);
+    const advisoriesByName = yield fetchNpmAdvisories(versionsByName);
+    if (!advisoriesByName)
+        return result;
+    // One finding per installed version that at least one advisory affects
+    const findings = [];
+    Object.entries(advisoriesByName).forEach(([name, advisories]) => {
+        var _a;
+        if (!Array.isArray(advisories))
+            return;
+        const versions = (_a = versionsByName.get(name)) !== null && _a !== void 0 ? _a : new Set();
+        versions.forEach((version) => {
+            const affecting = advisories.filter((advisory) => isVersionAffectedByAdvisory(version, advisory.vulnerable_versions));
+            if (affecting.length > 0) {
+                findings.push({ name, version, advisories: affecting });
+            }
+        });
+    });
+    yield Promise.all(findings.map(({ name, version, advisories }) => __awaiter(void 0, void 0, void 0, function* () {
+        var _h, _j, _k, _l, _m, _o;
+        const severity = getHighestSeverity(advisories);
+        if ((_h = direct.runtime.get(name)) === null || _h === void 0 ? void 0 : _h.has(version)) {
+            result.directVulns.set(name, {
+                name,
+                severity,
+                isDirect: true,
+                via: advisories.map((advisory) => ({
+                    source: advisory.id,
+                    name,
+                    url: advisory.url,
+                })),
+                effects: [],
+                range: advisories
+                    .map((advisory) => advisory.vulnerable_versions)
+                    .join(' || '),
+                fixAvailable: false,
+            });
+            return;
+        }
+        const patchStatuses = yield Promise.all(advisories.map((advisory) => getPatchStatus(advisory, name, version)));
+        const isDevelopment = (_k = (_j = direct.dev.get(name)) === null || _j === void 0 ? void 0 : _j.has(version)) !== null && _k !== void 0 ? _k : false;
+        const [dependent] = [...((_l = dependentsByName.get(name)) !== null && _l !== void 0 ? _l : [])].sort();
+        let dependencyPath = `(transitive) > ${name}`;
+        if (isDevelopment)
+            dependencyPath = `(dev) > ${name}`;
+        else if (dependent)
+            dependencyPath = `${dependent} > ${name}`;
+        const key = `${name}|${version}|${dependencyPath}`;
+        result.indirectVulns.push({
+            name,
+            version,
+            severity,
+            advisory: advisories.map((advisory) => advisory.url).join(', '),
+            recommendation: buildRecommendation(name, patchStatuses),
+            type: isDevelopment ? 'Dev' : 'Transitive',
+            dependencyPath,
+            verification: (_o = (_m = existingIndirectVerifications.get(key)) === null || _m === void 0 ? void 0 : _m.verification) !== null && _o !== void 0 ? _o : DEFAULT_VERIFICATION_RISK,
+        });
+    })));
+    result.indirectVulns.sort((a, b) => a.name.localeCompare(b.name) || compareVersions(a.version, b.version));
+    return result;
+});
+/**
+ * Run the security audit against the project's lockfile: yarn.lock projects
+ * are audited directly against the npm advisory database, package-lock.json
+ * projects through `npm audit`. yarn.lock wins when both exist, matching
+ * parseLockfileVersions.
+ */
+const runAudit = (rootPath, direct) => __awaiter(void 0, void 0, void 0, function* () {
+    if (node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'yarn.lock'))) {
+        return runYarnLockAudit(rootPath, direct);
+    }
+    if (node_fs_1.default.existsSync((0, node_path_1.join)(rootPath, 'package-lock.json'))) {
+        return runNpmAudit(rootPath);
+    }
+    core.warning('No lockfile found - continuing without audit data');
+    return emptyAuditResult();
+});
+/**
  * Check for open security advisories on GitHub that affect the specific version
  * Returns advisory info, or undefined if none found, or special "unverifiable" string for 404s
  */
 const checkSecurityAdvisories = (repoUrl, packageName, version) => __awaiter(void 0, void 0, void 0, function* () {
-    var _f;
+    var _p;
     try {
-        const { owner, name } = (_f = (0, parse_github_url_1.default)(repoUrl)) !== null && _f !== void 0 ? _f : {};
+        const { owner, name } = (_p = (0, parse_github_url_1.default)(repoUrl)) !== null && _p !== void 0 ? _p : {};
         if (!owner || !name)
             return { advisories: undefined, unverifiable: undefined };
         const cleanVersion = version.replaceAll(/[^\d.-]/g, '');
@@ -963,7 +1192,7 @@ const checkSecurityAdvisories = (repoUrl, packageName, version) => __awaiter(voi
 /**
  * Perform all risk checks and calculate overall risk level
  */
-const analyzeRisk = (npmData, packageName, version, repoUrl, licenseRisk, integrityResult, npmAuditVuln) => __awaiter(void 0, void 0, void 0, function* () {
+const analyzeRisk = (npmData, packageName, version, repoUrl, licenseRisk, integrityResult, auditVuln) => __awaiter(void 0, void 0, void 0, function* () {
     const reasons = [];
     const deprecation = checkDeprecation(npmData, version);
     const abandonment = checkAbandonment(npmData);
@@ -1008,9 +1237,9 @@ const analyzeRisk = (npmData, packageName, version, repoUrl, licenseRisk, integr
     // Add integrity status if any issues
     if (integrityStatus)
         reasons.push(integrityStatus);
-    // Add npm audit finding if any
-    if (npmAuditVuln)
-        reasons.push(formatAuditFinding(npmAuditVuln));
+    // Add security audit finding if any
+    if (auditVuln)
+        reasons.push(formatAuditFinding(auditVuln));
     // Check if any verification was impossible
     const hasUnverifiable = repoStatus.unverifiable || advisoriesResult.unverifiable;
     // Check for integrity issues (only if we got valid results)
@@ -1018,9 +1247,9 @@ const analyzeRisk = (npmData, packageName, version, repoUrl, licenseRisk, integr
         integrityResult.missingSignatures.size > 0
         ? !!integrityStatus
         : false;
-    // Check for high severity npm audit findings
-    const hasHighAuditFinding = npmAuditVuln &&
-        (npmAuditVuln.severity === 'critical' || npmAuditVuln.severity === 'high');
+    // Check for high severity security audit findings
+    const hasHighAuditFinding = auditVuln &&
+        (auditVuln.severity === 'critical' || auditVuln.severity === 'high');
     let level = 'Low';
     if (deprecation || vulnResult || repoStatus.archived || hasHighAuditFinding) {
         level = 'Critical';
@@ -1090,21 +1319,21 @@ const getVerification = (packageName, currentVersion, currentRiskLevel, currentR
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
  * @param integrityResult TIntegrityResult: results from integrity checks
- * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
+ * @param auditVulns Map: security audit vulnerabilities for direct dependencies
  */
 const getSoupDataForPackage = (soupName, soupVersion, flagGplAsHighRisk, integrityResult, auditVulns) => __awaiter(void 0, void 0, void 0, function* () {
-    var _g, _h, _j;
+    var _q, _r, _s;
     const soupDataResponse = yield (0, node_fetch_1.default)(`https://registry.npmjs.org/${soupName}`);
     const soupData = (yield soupDataResponse.json());
     let soupLanguages = 'unknown';
     let soupSite = 'private repo';
     let repoUrl;
     // Extract license from NPM data
-    const soupLicense = (_g = soupData === null || soupData === void 0 ? void 0 : soupData.license) !== null && _g !== void 0 ? _g : 'Unknown';
+    const soupLicense = (_q = soupData === null || soupData === void 0 ? void 0 : soupData.license) !== null && _q !== void 0 ? _q : 'Unknown';
     const licenseRisk = checkLicenseRisk(soupData === null || soupData === void 0 ? void 0 : soupData.license, flagGplAsHighRisk);
     if (soupData === null || soupData === void 0 ? void 0 : soupData.versions) {
         const versionSpecificSoupData = soupData === null || soupData === void 0 ? void 0 : soupData.versions[soupVersion.replaceAll(/[^\d.-]/g, '')];
-        if ((_h = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _h === void 0 ? void 0 : _h.url) {
+        if ((_r = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _r === void 0 ? void 0 : _r.url) {
             repoUrl = versionSpecificSoupData.repository.url;
             if (repoUrl.includes('github')) {
                 soupLanguages = yield getSoupLanguageData(repoUrl);
@@ -1112,12 +1341,12 @@ const getSoupDataForPackage = (soupName, soupVersion, flagGplAsHighRisk, integri
         }
         soupSite =
             (versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.homepage) ||
-                ((_j = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _j === void 0 ? void 0 : _j.url) ||
+                ((_s = versionSpecificSoupData === null || versionSpecificSoupData === void 0 ? void 0 : versionSpecificSoupData.repository) === null || _s === void 0 ? void 0 : _s.url) ||
                 'unknown';
     }
-    // Get npm audit vulnerability for this package if any
-    const npmAuditVuln = auditVulns.get(soupName);
-    const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl, licenseRisk, integrityResult, npmAuditVuln);
+    // Get security audit vulnerability for this package if any
+    const auditVuln = auditVulns.get(soupName);
+    const riskAnalysis = yield analyzeRisk(soupData, soupName, soupVersion, repoUrl, licenseRisk, integrityResult, auditVuln);
     return {
         soupName,
         soupLanguages,
@@ -1171,7 +1400,7 @@ const findFilesRecursive = (directory, resultArray) => {
  * @param packageJSON TPackageJson: the contents of a single package JSON to generate a SOUP table for
  * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
  * @param integrityResult TIntegrityResult: results from integrity checks
- * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
+ * @param auditVulns Map: security audit vulnerabilities for direct dependencies
  */
 const getSoupDataForPackageCollection = (packageJSON, flagGplAsHighRisk, integrityResult, auditVulns, lockfileVersions) => __awaiter(void 0, void 0, void 0, function* () {
     const soupDataRequests = [];
@@ -1346,7 +1575,7 @@ const generateSoupHeader = (packageJSONs, flagGplAsHighRisk) => {
     const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team.
 
 Risk levels are automatically calculated based on:
-- **Critical**: Package is deprecated, has known vulnerabilities, repository is archived, or has critical/high npm audit findings
+- **Critical**: Package is deprecated, has known vulnerabilities, repository is archived, or has critical/high security audit findings
 - **High**: Package is abandoned (>2 years without updates), has open security advisories, is 2+ major versions behind latest, or ${gplRiskNote}
 - **Medium**: Low maintenance activity (>1 year without commits), 1 major version behind, >1 minor versions behind, weak copyleft license (LGPL/MPL), unknown license, or integrity verification issues
 - **Low**: Passed all automated checks
@@ -1478,12 +1707,12 @@ const findExistingPr = (owner, repo, branchName) => __awaiter(void 0, void 0, vo
  * @param prLabels string: comma-separated labels
  */
 const createOrUpdatePr = (soupPath, branchName, prTitle, prLabels, customPrBody) => __awaiter(void 0, void 0, void 0, function* () {
-    var _k, _l;
+    var _t, _u;
     const { owner, repo } = github.context.repo;
     let baseBranch;
     if (github.context.eventName === 'pull_request') {
         const pr = github.context.payload.pull_request;
-        baseBranch = (_l = (_k = pr === null || pr === void 0 ? void 0 : pr.base) === null || _k === void 0 ? void 0 : _k.ref) !== null && _l !== void 0 ? _l : 'main';
+        baseBranch = (_u = (_t = pr === null || pr === void 0 ? void 0 : pr.base) === null || _t === void 0 ? void 0 : _t.ref) !== null && _u !== void 0 ? _u : 'main';
     }
     else {
         baseBranch = github.context.ref.replace('refs/heads/', '');
@@ -1577,17 +1806,18 @@ const generateSoupRegister = () => __awaiter(void 0, void 0, void 0, function* (
     const packageJSONPaths = [];
     findFilesRecursive(rootPath, packageJSONPaths);
     // Read SOUP dependencies from package json
-    const packageJSONs = packageJSONPaths
-        .map((packageJSONPath) => {
+    const allPackageJSONs = packageJSONPaths.map((packageJSONPath) => {
         const packageString = node_fs_1.default.readFileSync(packageJSONPath).toString();
-        const packageJSON = JSON.parse(packageString);
-        return packageJSON;
-    })
-        // filter out package.json files without dependencies
-        .filter((packageJSON) => !!packageJSON.dependencies);
-    // Run npm audit (generates temporary package-lock.json if needed)
+        return JSON.parse(packageString);
+    });
+    // filter out package.json files without dependencies
+    const packageJSONs = allPackageJSONs.filter((packageJSON) => !!packageJSON.dependencies);
+    // Run the security audit against the lockfile
     core.info(`🔍 Running security audit...`);
-    const { directVulns: auditVulns, indirectVulns } = runAudit(rootPath);
+    const { directVulns: auditVulns, indirectVulns } = yield runAudit(rootPath, {
+        runtime: getDirectDependencyVersions(allPackageJSONs, 'dependencies', lockfileVersions),
+        dev: getDirectDependencyVersions(allPackageJSONs, 'devDependencies', lockfileVersions),
+    });
     if (auditVulns.size > 0) {
         core.warning(`Found ${auditVulns.size} direct dependencies with audit findings`);
     }

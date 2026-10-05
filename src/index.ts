@@ -103,6 +103,7 @@ const escapeTableCell = (value: string): string => value.replaceAll('|', '\\|')
 type TPackageJson = {
   name: string
   dependencies?: { [key: string]: string }
+  devDependencies?: { [key: string]: string }
 }
 
 type TNpmData =
@@ -207,6 +208,34 @@ type TIndirectVulnerability = {
   verification: string
 }
 
+type TAuditResult = {
+  directVulns: Map<string, TNpmAuditVulnerability>
+  indirectVulns: TIndirectVulnerability[]
+}
+// One advisory as returned by the npm bulk advisory endpoint
+type TNpmBulkAdvisory = {
+  id: number
+  url: string
+  title: string
+  severity: TNpmAuditVulnerability['severity']
+  vulnerable_versions: string
+}
+// One installed package from yarn.lock with the dependencies it declares
+type TYarnLockEntry = {
+  name: string
+  version: string
+  dependencies: string[]
+}
+// Whether a fix exists for an advisory as it applies to an installed version
+type TPatchStatus =
+  | { kind: 'patched'; version: string }
+  | { kind: 'unpatched' }
+  | { kind: 'unknown' }
+// Exact installed versions of direct dependencies, keyed by package name
+type TDirectDependencyVersions = {
+  runtime: Map<string, Set<string>>
+  dev: Map<string, Set<string>>
+}
 type TIntegrityResult = {
   invalidSignatures: Set<string>
   missingSignatures: Set<string>
@@ -590,104 +619,20 @@ const checkIntegrityStatus = (
 }
 
 /**
- * Ensure a package-lock.json exists for npm audit.
- * If one already exists, returns false (nothing to clean up).
- * If not, generates a temporary one and returns true (caller must clean up).
- *
- * Note: `npm i --package-lock-only` rewrites yarn.lock resolved URLs as a
- * side effect, so we restore yarn.lock via git checkout afterwards.
+ * Execute npm audit against the project's package-lock.json and return stdout.
  */
-const ensurePackageLock = (rootPath: string): boolean => {
-  const packageLockPath = join(rootPath, 'package-lock.json')
-
-  if (fs.existsSync(packageLockPath)) {
-    return false
-  }
-
-  core.info(
-    '📦 No package-lock.json found — generating temporary lockfile for npm audit...'
-  )
+const executeNpmAudit = (rootPath: string): string | undefined => {
   try {
-    execSync(
-      'npm i --package-lock-only --ignore-scripts --legacy-peer-deps 2>/dev/null',
-      {
-        cwd: rootPath,
-        encoding: 'utf8',
-        maxBuffer: 10 * 1024 * 1024,
-      }
-    )
-    return true
-  } catch (error) {
-    core.warning(
-      `Failed to generate temporary package-lock.json: ${
-        error instanceof Error ? error.message : 'Unknown error'
-      }`
-    )
-    return false
-  } finally {
-    // Restore yarn.lock — npm i --package-lock-only rewrites resolved URLs
-    const yarnLockPath = join(rootPath, 'yarn.lock')
-    if (fs.existsSync(yarnLockPath)) {
-      try {
-        execSync('git checkout -- yarn.lock', {
-          cwd: rootPath,
-          encoding: 'utf8',
-        })
-      } catch {
-        core.warning(
-          'Failed to restore yarn.lock after npm lockfile generation'
-        )
-      }
-    }
-  }
-}
-
-/**
- * Remove the temporary package-lock.json if we created it
- */
-const cleanupTemporaryPackageLock = (rootPath: string): void => {
-  const packageLockPath = join(rootPath, 'package-lock.json')
-  try {
-    fs.unlinkSync(packageLockPath)
-    core.info('🧹 Cleaned up temporary package-lock.json')
-  } catch {
-    core.warning('Failed to clean up temporary package-lock.json')
-  }
-}
-
-/**
- * Execute npm audit and return stdout.
- * Generates a temporary package-lock.json if needed (e.g. yarn-only projects).
- */
-const executeAudit = (
-  rootPath: string
-): { result: string | undefined; createdTempLockfile: boolean } => {
-  const createdTemporaryLockfile = ensurePackageLock(rootPath)
-  const packageLockPath = join(rootPath, 'package-lock.json')
-
-  if (!fs.existsSync(packageLockPath)) {
-    return { result: undefined, createdTempLockfile: false }
-  }
-
-  try {
-    const result = execSync('npm audit --json 2>/dev/null', {
+    return execSync('npm audit --json 2>/dev/null', {
       cwd: rootPath,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
     })
-    return { result, createdTempLockfile: createdTemporaryLockfile }
   } catch (error) {
     // npm audit exits with non-zero when vulnerabilities are found
     const execError = error as { stdout?: string }
-    if (execError.stdout) {
-      return {
-        result: execError.stdout,
-        createdTempLockfile: createdTemporaryLockfile,
-      }
-    }
+    return execError.stdout || undefined
   }
-
-  return { result: undefined, createdTempLockfile: createdTemporaryLockfile }
 }
 
 /**
@@ -755,31 +700,22 @@ const parseNpmAuditOutput = (
   return { directVulns, indirectVulns }
 }
 
+const emptyAuditResult = (): TAuditResult => ({
+  directVulns: new Map<string, TNpmAuditVulnerability>(),
+  indirectVulns: [],
+})
+
 /**
- * Run npm audit and parse results.
- * Generates a temporary package-lock.json if needed (e.g. yarn-only projects)
- * and cleans it up afterwards.
- * Returns vulnerability data for direct and indirect dependencies.
+ * Run npm audit on a project that ships a package-lock.json.
  */
-const runAudit = (
-  rootPath: string
-): {
-  directVulns: Map<string, TNpmAuditVulnerability>
-  indirectVulns: TIndirectVulnerability[]
-} => {
-  const emptyResult = {
-    directVulns: new Map<string, TNpmAuditVulnerability>(),
-    indirectVulns: [] as TIndirectVulnerability[],
+const runNpmAudit = (rootPath: string): TAuditResult => {
+  const result = executeNpmAudit(rootPath)
+  if (!result) {
+    core.warning('npm audit failed - continuing without audit data')
+    return emptyAuditResult()
   }
 
-  const { result, createdTempLockfile } = executeAudit(rootPath)
-
   try {
-    if (!result) {
-      core.warning('npm audit failed - continuing without audit data')
-      return emptyResult
-    }
-
     return parseNpmAuditOutput(result)
   } catch (error) {
     core.warning(
@@ -787,16 +723,12 @@ const runAudit = (
         error instanceof Error ? error.message : 'Unknown error'
       } - continuing without audit data`
     )
-    return emptyResult
-  } finally {
-    if (createdTempLockfile) {
-      cleanupTemporaryPackageLock(rootPath)
-    }
+    return emptyAuditResult()
   }
 }
 
 /**
- * Format npm audit findings for a direct dependency
+ * Format security audit findings for a direct dependency
  */
 const formatAuditFinding = (vuln: TNpmAuditVulnerability): string => {
   const severityMap: Record<string, string> = {
@@ -806,7 +738,9 @@ const formatAuditFinding = (vuln: TNpmAuditVulnerability): string => {
     low: 'Low',
     info: 'Info',
   }
-  return `npm audit: ${severityMap[vuln.severity] ?? vuln.severity} severity`
+  return `Security audit: ${
+    severityMap[vuln.severity] ?? vuln.severity
+  } severity`
 }
 
 /**
@@ -1171,14 +1105,18 @@ const isVersionAffectedByAdvisory = (
 ): boolean => {
   if (!vulnerableRange) return true // No range specified, assume affected
 
-  const normalizedVersion = coerce(version)?.version
+  const normalizedVersion = coerce(version, {
+    includePrerelease: true,
+  })?.version
   if (!normalizedVersion) return true // Can't parse, assume affected
 
   try {
     // Convert GitHub format to semver format
     // GitHub uses ", " to separate conditions, semver uses " "
     const semverRange = vulnerableRange.replaceAll(/,\s*/g, ' ')
-    return satisfies(normalizedVersion, semverRange)
+    return satisfies(normalizedVersion, semverRange, {
+      includePrerelease: true,
+    })
   } catch {
     // Invalid range, assume affected
     return true
@@ -1193,7 +1131,390 @@ type TGitHubAdvisory = {
       name?: string
     }
     vulnerable_version_range?: string
+    first_patched_version?: string | null
   }>
+}
+
+/**
+ * Resolve the package name of a yarn.lock specifier such as
+ * `@scope/name@^1.0.0`, or the real name behind an alias such as
+ * `alias@npm:real-name@^1.0.0`.
+ */
+const getYarnSpecifierName = (specifier: string): string | undefined => {
+  const match = specifier.match(/^(@?[^@]+)@(.*)$/)
+  if (!match) return undefined
+  if (match[2].startsWith('npm:')) {
+    return getYarnSpecifierName(match[2].slice(4)) ?? match[1]
+  }
+  return match[1]
+}
+
+/**
+ * Parse a yarn.lock (v1) into its installed packages and the dependencies
+ * each one declares, so a vulnerable package can be traced to a dependent.
+ */
+const parseYarnLockEntries = (content: string): TYarnLockEntry[] => {
+  const entries: TYarnLockEntry[] = []
+  let current: TYarnLockEntry | undefined
+  let inDependencyBlock = false
+
+  content.split('\n').forEach((line) => {
+    if (line.startsWith('#') || line.trim() === '') return
+
+    if (!line.startsWith(' ')) {
+      // Entry header, e.g. `"semver@^7.3.7", "semver@^7.3.8":` — every
+      // specifier resolves to the same package, so the first one names it
+      const firstSpecifier = line
+        .replace(/:\s*$/, '')
+        .split(', ')[0]
+        .replaceAll(/^"|"$/g, '')
+      const name = getYarnSpecifierName(firstSpecifier)
+      current = name ? { name, version: '', dependencies: [] } : undefined
+      if (current) entries.push(current)
+      inDependencyBlock = false
+      return
+    }
+
+    if (!current) return
+
+    if (line.startsWith('    ')) {
+      // Nested line of a dependency block, e.g. `    braces "^3.0.3"`
+      if (!inDependencyBlock) return
+      const match = line.trim().match(/^"?([^\s"]+)"?\s+"?(.*?)"?$/)
+      if (!match) return
+      const dependencyName = match[2].startsWith('npm:')
+        ? getYarnSpecifierName(match[2].slice(4)) ?? match[1]
+        : match[1]
+      current.dependencies.push(dependencyName)
+      return
+    }
+
+    const property = line.trim()
+    const versionMatch = property.match(/^version "(.+)"$/)
+    if (versionMatch) {
+      const [, version] = versionMatch
+      current.version = version
+    }
+    inDependencyBlock =
+      property === 'dependencies:' || property === 'optionalDependencies:'
+  })
+
+  return entries.filter((entry) => entry.version !== '')
+}
+
+const NPM_BULK_ADVISORY_URL =
+  'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk'
+
+/**
+ * Fetch the advisories for every installed version in one request from the
+ * npm advisory database, the same source `npm audit` queries.
+ * Returns undefined after recording an API failure.
+ */
+const fetchNpmAdvisories = async (
+  versionsByName: Map<string, Set<string>>
+): Promise<Record<string, TNpmBulkAdvisory[]> | undefined> => {
+  const body: Record<string, string[]> = {}
+  versionsByName.forEach((versions, name) => {
+    body[name] = [...versions]
+  })
+
+  try {
+    const response = await fetch(NPM_BULK_ADVISORY_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      trackApiFailure(
+        'npm advisory API',
+        'yarn.lock',
+        new Error(`HTTP ${response.status}`)
+      )
+      return undefined
+    }
+    const data: unknown = await response.json()
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      trackApiFailure(
+        'npm advisory API',
+        'yarn.lock',
+        new Error('Unexpected response shape')
+      )
+      return undefined
+    }
+    return data as Record<string, TNpmBulkAdvisory[]>
+  } catch (error) {
+    trackApiFailure('npm advisory API', 'yarn.lock', error)
+    return undefined
+  }
+}
+
+const SEVERITY_ORDER: TNpmAuditVulnerability['severity'][] = [
+  'info',
+  'low',
+  'moderate',
+  'high',
+  'critical',
+]
+
+const getHighestSeverity = (
+  advisories: TNpmBulkAdvisory[]
+): TNpmAuditVulnerability['severity'] => {
+  const highestIndex = Math.max(
+    0,
+    ...advisories.map((advisory) => SEVERITY_ORDER.indexOf(advisory.severity))
+  )
+  return SEVERITY_ORDER[highestIndex]
+}
+
+// GitHub advisory lookups, cached so each advisory is fetched once per run
+const gitHubAdvisoryCache = new Map<
+  string,
+  Promise<TGitHubAdvisory | undefined>
+>()
+
+const fetchGitHubAdvisory = async (
+  ghsaId: string
+): Promise<TGitHubAdvisory | undefined> => {
+  try {
+    const response = await octokit.request('GET /advisories/{ghsa_id}', {
+      ghsa_id: ghsaId,
+    })
+    return response.data as TGitHubAdvisory
+  } catch (error) {
+    // 404 means the advisory was withdrawn or is unknown to GitHub
+    const { status } = error as { status?: number }
+    if (status !== 404) {
+      trackApiFailure('GitHub Advisories API', ghsaId, error)
+    }
+    return undefined
+  }
+}
+
+const getGitHubAdvisory = (
+  ghsaId: string
+): Promise<TGitHubAdvisory | undefined> => {
+  const cached = gitHubAdvisoryCache.get(ghsaId)
+  if (cached) return cached
+  const request = fetchGitHubAdvisory(ghsaId)
+  gitHubAdvisoryCache.set(ghsaId, request)
+  return request
+}
+
+/**
+ * Determine whether a fix exists for an advisory as it applies to the
+ * installed version, from the GitHub advisory's first patched version.
+ */
+const getPatchStatus = async (
+  advisory: TNpmBulkAdvisory,
+  packageName: string,
+  version: string
+): Promise<TPatchStatus> => {
+  const [ghsaId] = advisory.url.match(/GHSA-[\w-]+$/) ?? []
+  if (!ghsaId) return { kind: 'unknown' }
+
+  const gitHubAdvisory = await getGitHubAdvisory(ghsaId)
+  const vulnerability = gitHubAdvisory?.vulnerabilities?.find(
+    (vuln) =>
+      (!vuln.package?.ecosystem || vuln.package.ecosystem === 'npm') &&
+      vuln.package?.name === packageName &&
+      isVersionAffectedByAdvisory(version, vuln.vulnerable_version_range)
+  )
+  if (!vulnerability) return { kind: 'unknown' }
+  return vulnerability.first_patched_version
+    ? { kind: 'patched', version: vulnerability.first_patched_version }
+    : { kind: 'unpatched' }
+}
+
+const compareVersions = (a: string, b: string): number => {
+  try {
+    return compare(a, b)
+  } catch {
+    return a.localeCompare(b)
+  }
+}
+
+/**
+ * Build the recommendation for a vulnerable installed version: the lowest
+ * version that fixes every advisory affecting it, or a note that no fix
+ * exists yet.
+ */
+const buildRecommendation = (
+  packageName: string,
+  patchStatuses: TPatchStatus[]
+): string => {
+  if (patchStatuses.some((status) => status.kind === 'unpatched')) {
+    return 'No patched version available'
+  }
+  const patchedVersions = patchStatuses
+    .filter(
+      (status): status is { kind: 'patched'; version: string } =>
+        status.kind === 'patched'
+    )
+    .map((status) => status.version)
+  if (patchedVersions.length !== patchStatuses.length) return 'See advisory'
+  const [highest] = patchedVersions.sort((a, b) => compareVersions(b, a))
+  return `Upgrade ${packageName} to >= ${highest}`
+}
+
+/**
+ * Resolve the exact installed version of every direct dependency of the given
+ * kind across all package.json files, keyed by package name.
+ */
+const getDirectDependencyVersions = (
+  packageJSONs: TPackageJson[],
+  kind: 'dependencies' | 'devDependencies',
+  lockfileVersions: Map<string, string>
+): Map<string, Set<string>> => {
+  const versionsByName = new Map<string, Set<string>>()
+  packageJSONs.forEach((packageJSON) => {
+    Object.entries(packageJSON[kind] ?? {}).forEach(([name, specifier]) => {
+      const version = resolveVersion(name, specifier, lockfileVersions)
+      versionsByName.set(
+        name,
+        (versionsByName.get(name) ?? new Set<string>()).add(version)
+      )
+    })
+  })
+  return versionsByName
+}
+
+/**
+ * Audit every package version installed through yarn.lock against the npm
+ * advisory database. Vulnerable direct runtime dependencies feed the main
+ * tables; dev and transitive findings go to the indirect section, traced to
+ * the dependent that pulls them in.
+ */
+const runYarnLockAudit = async (
+  rootPath: string,
+  direct: TDirectDependencyVersions
+): Promise<TAuditResult> => {
+  const result = emptyAuditResult()
+  const entries = parseYarnLockEntries(
+    fs.readFileSync(join(rootPath, 'yarn.lock'), 'utf8')
+  )
+
+  const versionsByName = new Map<string, Set<string>>()
+  const dependentsByName = new Map<string, Set<string>>()
+  entries.forEach((entry) => {
+    versionsByName.set(
+      entry.name,
+      (versionsByName.get(entry.name) ?? new Set<string>()).add(entry.version)
+    )
+    entry.dependencies.forEach((dependency) => {
+      dependentsByName.set(
+        dependency,
+        (dependentsByName.get(dependency) ?? new Set<string>()).add(entry.name)
+      )
+    })
+  })
+
+  if (versionsByName.size === 0) {
+    trackApiFailure(
+      'yarn.lock audit',
+      'yarn.lock',
+      new Error('No packages found - only yarn v1 lockfiles are supported')
+    )
+    return result
+  }
+
+  core.info(
+    `📦 Auditing ${versionsByName.size} packages from yarn.lock against the npm advisory database...`
+  )
+  const advisoriesByName = await fetchNpmAdvisories(versionsByName)
+  if (!advisoriesByName) return result
+
+  // One finding per installed version that at least one advisory affects
+  const findings: Array<{
+    name: string
+    version: string
+    advisories: TNpmBulkAdvisory[]
+  }> = []
+  Object.entries(advisoriesByName).forEach(([name, advisories]) => {
+    if (!Array.isArray(advisories)) return
+    const versions = versionsByName.get(name) ?? new Set<string>()
+    versions.forEach((version) => {
+      const affecting = advisories.filter((advisory) =>
+        isVersionAffectedByAdvisory(version, advisory.vulnerable_versions)
+      )
+      if (affecting.length > 0) {
+        findings.push({ name, version, advisories: affecting })
+      }
+    })
+  })
+
+  await Promise.all(
+    findings.map(async ({ name, version, advisories }) => {
+      const severity = getHighestSeverity(advisories)
+
+      if (direct.runtime.get(name)?.has(version)) {
+        result.directVulns.set(name, {
+          name,
+          severity,
+          isDirect: true,
+          via: advisories.map((advisory) => ({
+            source: advisory.id,
+            name,
+            url: advisory.url,
+          })),
+          effects: [],
+          range: advisories
+            .map((advisory) => advisory.vulnerable_versions)
+            .join(' || '),
+          fixAvailable: false,
+        })
+        return
+      }
+
+      const patchStatuses = await Promise.all(
+        advisories.map((advisory) => getPatchStatus(advisory, name, version))
+      )
+      const isDevelopment = direct.dev.get(name)?.has(version) ?? false
+      const [dependent] = [...(dependentsByName.get(name) ?? [])].sort()
+      let dependencyPath = `(transitive) > ${name}`
+      if (isDevelopment) dependencyPath = `(dev) > ${name}`
+      else if (dependent) dependencyPath = `${dependent} > ${name}`
+
+      const key = `${name}|${version}|${dependencyPath}`
+      result.indirectVulns.push({
+        name,
+        version,
+        severity,
+        advisory: advisories.map((advisory) => advisory.url).join(', '),
+        recommendation: buildRecommendation(name, patchStatuses),
+        type: isDevelopment ? 'Dev' : 'Transitive',
+        dependencyPath,
+        verification:
+          existingIndirectVerifications.get(key)?.verification ??
+          DEFAULT_VERIFICATION_RISK,
+      })
+    })
+  )
+
+  result.indirectVulns.sort(
+    (a, b) =>
+      a.name.localeCompare(b.name) || compareVersions(a.version, b.version)
+  )
+  return result
+}
+
+/**
+ * Run the security audit against the project's lockfile: yarn.lock projects
+ * are audited directly against the npm advisory database, package-lock.json
+ * projects through `npm audit`. yarn.lock wins when both exist, matching
+ * parseLockfileVersions.
+ */
+const runAudit = async (
+  rootPath: string,
+  direct: TDirectDependencyVersions
+): Promise<TAuditResult> => {
+  if (fs.existsSync(join(rootPath, 'yarn.lock'))) {
+    return runYarnLockAudit(rootPath, direct)
+  }
+  if (fs.existsSync(join(rootPath, 'package-lock.json'))) {
+    return runNpmAudit(rootPath)
+  }
+  core.warning('No lockfile found - continuing without audit data')
+  return emptyAuditResult()
 }
 
 /**
@@ -1303,7 +1624,7 @@ const analyzeRisk = async (
   repoUrl: string | undefined,
   licenseRisk: TLicenseRisk,
   integrityResult: TIntegrityResult,
-  npmAuditVuln: TNpmAuditVulnerability | undefined
+  auditVuln: TNpmAuditVulnerability | undefined
 ): Promise<TRiskAnalysis> => {
   const reasons: string[] = []
 
@@ -1342,8 +1663,8 @@ const analyzeRisk = async (
   if (licenseRisk.reason) reasons.push(licenseRisk.reason)
   // Add integrity status if any issues
   if (integrityStatus) reasons.push(integrityStatus)
-  // Add npm audit finding if any
-  if (npmAuditVuln) reasons.push(formatAuditFinding(npmAuditVuln))
+  // Add security audit finding if any
+  if (auditVuln) reasons.push(formatAuditFinding(auditVuln))
 
   // Check if any verification was impossible
   const hasUnverifiable =
@@ -1356,10 +1677,10 @@ const analyzeRisk = async (
       ? !!integrityStatus
       : false
 
-  // Check for high severity npm audit findings
+  // Check for high severity security audit findings
   const hasHighAuditFinding =
-    npmAuditVuln &&
-    (npmAuditVuln.severity === 'critical' || npmAuditVuln.severity === 'high')
+    auditVuln &&
+    (auditVuln.severity === 'critical' || auditVuln.severity === 'high')
 
   let level: TRiskAnalysis['level'] = 'Low'
 
@@ -1449,7 +1770,7 @@ const getVerification = (
  * @param soupVersion string: version of the SOUP as listed in our lockfile
  * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
  * @param integrityResult TIntegrityResult: results from integrity checks
- * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
+ * @param auditVulns Map: security audit vulnerabilities for direct dependencies
  */
 const getSoupDataForPackage = async (
   soupName: string,
@@ -1487,8 +1808,8 @@ const getSoupDataForPackage = async (
       'unknown'
   }
 
-  // Get npm audit vulnerability for this package if any
-  const npmAuditVuln = auditVulns.get(soupName)
+  // Get security audit vulnerability for this package if any
+  const auditVuln = auditVulns.get(soupName)
 
   const riskAnalysis = await analyzeRisk(
     soupData,
@@ -1497,7 +1818,7 @@ const getSoupDataForPackage = async (
     repoUrl,
     licenseRisk,
     integrityResult,
-    npmAuditVuln
+    auditVuln
   )
 
   return {
@@ -1565,7 +1886,7 @@ const findFilesRecursive = (directory: string, resultArray: string[]) => {
  * @param packageJSON TPackageJson: the contents of a single package JSON to generate a SOUP table for
  * @param flagGplAsHighRisk boolean: whether to treat GPL/AGPL as High risk
  * @param integrityResult TIntegrityResult: results from integrity checks
- * @param auditVulns Map: npm audit vulnerabilities for direct dependencies
+ * @param auditVulns Map: security audit vulnerabilities for direct dependencies
  */
 const getSoupDataForPackageCollection = async (
   packageJSON: TPackageJson,
@@ -1809,7 +2130,7 @@ const generateSoupHeader = (
   const intro = `This document contains a list of all SOUP (Software of Unknown Provenance) dependencies used in this repository. SOUP is third-party software that is included in the project and is not developed by the project team.
 
 Risk levels are automatically calculated based on:
-- **Critical**: Package is deprecated, has known vulnerabilities, repository is archived, or has critical/high npm audit findings
+- **Critical**: Package is deprecated, has known vulnerabilities, repository is archived, or has critical/high security audit findings
 - **High**: Package is abandoned (>2 years without updates), has open security advisories, is 2+ major versions behind latest, or ${gplRiskNote}
 - **Medium**: Low maintenance activity (>1 year without commits), 1 major version behind, >1 minor versions behind, weak copyleft license (LGPL/MPL), unknown license, or integrity verification issues
 - **Low**: Passed all automated checks
@@ -2120,18 +2441,29 @@ const generateSoupRegister = async () => {
   findFilesRecursive(rootPath, packageJSONPaths)
 
   // Read SOUP dependencies from package json
-  const packageJSONs = packageJSONPaths
-    .map((packageJSONPath) => {
-      const packageString = fs.readFileSync(packageJSONPath).toString()
-      const packageJSON = JSON.parse(packageString) as TPackageJson
-      return packageJSON
-    })
-    // filter out package.json files without dependencies
-    .filter((packageJSON) => !!packageJSON.dependencies)
+  const allPackageJSONs = packageJSONPaths.map((packageJSONPath) => {
+    const packageString = fs.readFileSync(packageJSONPath).toString()
+    return JSON.parse(packageString) as TPackageJson
+  })
+  // filter out package.json files without dependencies
+  const packageJSONs = allPackageJSONs.filter(
+    (packageJSON) => !!packageJSON.dependencies
+  )
 
-  // Run npm audit (generates temporary package-lock.json if needed)
+  // Run the security audit against the lockfile
   core.info(`🔍 Running security audit...`)
-  const { directVulns: auditVulns, indirectVulns } = runAudit(rootPath)
+  const { directVulns: auditVulns, indirectVulns } = await runAudit(rootPath, {
+    runtime: getDirectDependencyVersions(
+      allPackageJSONs,
+      'dependencies',
+      lockfileVersions
+    ),
+    dev: getDirectDependencyVersions(
+      allPackageJSONs,
+      'devDependencies',
+      lockfileVersions
+    ),
+  })
   if (auditVulns.size > 0) {
     core.warning(
       `Found ${auditVulns.size} direct dependencies with audit findings`
