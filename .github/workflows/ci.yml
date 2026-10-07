@@ -38,3 +38,7 @@ jobs:
 
       - name: Generate SOUP register
         run: node dist/index.js
+        env:
+          # Authenticate the action's GitHub API calls; unauthenticated runs
+          # share a 60 requests/hour budget per runner IP and get rate limited
+          INPUT_TOKEN: ${{ github.token }}

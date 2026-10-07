@@ -16,7 +16,7 @@ The action scans all `package.json` files (supporting monorepos) and generates a
 - **GitHub API** — programming languages, repository archived/maintenance status
 - **OSV.dev** — known vulnerability database, filtered to the exact installed version
 - **GitHub Security Advisories** — published advisories affecting the installed version
-- **npm/yarn audit** — security audit findings for direct and transitive dependencies
+- **Security audit** — every package version in `yarn.lock` is checked against the npm advisory database (projects with a `package-lock.json` use `npm audit`); findings cover direct, dev and transitive dependencies with the dependent that pulls each one in
 - **Package integrity** — NPM registry signature verification and lockfile hash checks
 
 ### Risk Analysis
