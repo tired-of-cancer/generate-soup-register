@@ -795,6 +795,9 @@ const checkGitHubRepoStatus = (repoUrl, packageName) => __awaiter(void 0, void 0
 /**
  * Check if a version is affected by a GitHub advisory's vulnerable_version_range
  * GitHub format: ">= 5.16.0, <= 5.19.0" or "< 1.2.3" etc.
+ * Unparseable versions or ranges count as affected on purpose: a false
+ * positive shows up in the register for a human to judge, a false negative
+ * would hide a real finding.
  */
 const isVersionAffectedByAdvisory = (version, vulnerableRange) => {
     var _a;
@@ -842,18 +845,19 @@ const parseYarnLockEntries = (content) => {
     let current;
     let inDependencyBlock = false;
     content.split('\n').forEach((line) => {
-        var _a;
         if (line.startsWith('#') || line.trim() === '')
             return;
         if (!line.startsWith(' ')) {
             // Entry header, e.g. `"semver@^7.3.7", "semver@^7.3.8":` — every
             // specifier resolves to the same package, so the first one names it
-            const firstSpecifier = line
+            const specifiers = line
                 .replace(/:\s*$/, '')
-                .split(', ')[0]
-                .replaceAll(/^"|"$/g, '');
-            const name = getYarnSpecifierName(firstSpecifier);
-            current = name ? { name, version: '', dependencies: [] } : undefined;
+                .split(', ')
+                .map((specifier) => specifier.replaceAll(/^"|"$/g, ''));
+            const name = getYarnSpecifierName(specifiers[0]);
+            current = name
+                ? { name, version: '', specifiers, dependencies: [] }
+                : undefined;
             if (current)
                 entries.push(current);
             inDependencyBlock = false;
@@ -862,16 +866,14 @@ const parseYarnLockEntries = (content) => {
         if (!current)
             return;
         if (line.startsWith('    ')) {
-            // Nested line of a dependency block, e.g. `    braces "^3.0.3"`
+            // Nested line of a dependency block, e.g. `    braces "^3.0.3"`,
+            // stored as the specifier `braces@^3.0.3` so it matches an entry header
             if (!inDependencyBlock)
                 return;
             const match = line.trim().match(/^"?([^\s"]+)"?\s+"?(.*?)"?$/);
             if (!match)
                 return;
-            const dependencyName = match[2].startsWith('npm:')
-                ? (_a = getYarnSpecifierName(match[2].slice(4))) !== null && _a !== void 0 ? _a : match[1]
-                : match[1];
-            current.dependencies.push(dependencyName);
+            current.dependencies.push(`${match[1]}@${match[2]}`);
             return;
         }
         const property = line.trim();
@@ -886,6 +888,7 @@ const parseYarnLockEntries = (content) => {
     return entries.filter((entry) => entry.version !== '');
 };
 const NPM_BULK_ADVISORY_URL = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk';
+const ADVISORY_REQUEST_TIMEOUT_MS = 30000;
 /**
  * Fetch the advisories for every installed version in one request from the
  * npm advisory database, the same source `npm audit` queries.
@@ -901,6 +904,7 @@ const fetchNpmAdvisories = (versionsByName) => __awaiter(void 0, void 0, void 0,
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(ADVISORY_REQUEST_TIMEOUT_MS),
         });
         if (!response.ok) {
             trackApiFailure('npm advisory API', 'yarn.lock', new Error(`HTTP ${response.status}`));
@@ -935,6 +939,7 @@ const fetchGitHubAdvisory = (ghsaId) => __awaiter(void 0, void 0, void 0, functi
     try {
         const response = yield octokit.request('GET /advisories/{ghsa_id}', {
             ghsa_id: ghsaId,
+            request: { signal: AbortSignal.timeout(ADVISORY_REQUEST_TIMEOUT_MS) },
         });
         return response.data;
     }
@@ -1011,9 +1016,13 @@ const getDirectDependencyVersions = (packageJSONs, kind, lockfileVersions) => {
     packageJSONs.forEach((packageJSON) => {
         var _a;
         Object.entries((_a = packageJSON[kind]) !== null && _a !== void 0 ? _a : {}).forEach(([name, specifier]) => {
-            var _a;
+            var _a, _b;
             const version = resolveVersion(name, specifier, lockfileVersions);
-            versionsByName.set(name, ((_a = versionsByName.get(name)) !== null && _a !== void 0 ? _a : new Set()).add(version));
+            // `alias: "npm:real@range"` installs `real`; findings carry that name
+            const installedName = specifier.startsWith('npm:')
+                ? (_a = getYarnSpecifierName(specifier.slice(4))) !== null && _a !== void 0 ? _a : name
+                : name;
+            versionsByName.set(installedName, ((_b = versionsByName.get(installedName)) !== null && _b !== void 0 ? _b : new Set()).add(version));
         });
     });
     return versionsByName;
@@ -1028,13 +1037,26 @@ const runYarnLockAudit = (rootPath, direct) => __awaiter(void 0, void 0, void 0,
     const result = emptyAuditResult();
     const entries = parseYarnLockEntries(node_fs_1.default.readFileSync((0, node_path_1.join)(rootPath, 'yarn.lock'), 'utf8'));
     const versionsByName = new Map();
-    const dependentsByName = new Map();
+    const versionBySpecifier = new Map();
     entries.forEach((entry) => {
         var _a;
         versionsByName.set(entry.name, ((_a = versionsByName.get(entry.name)) !== null && _a !== void 0 ? _a : new Set()).add(entry.version));
-        entry.dependencies.forEach((dependency) => {
+        entry.specifiers.forEach((specifier) => {
+            versionBySpecifier.set(specifier, entry.version);
+        });
+    });
+    // Dependents per installed version, so a finding is traced to a package
+    // that pulls in that exact version and not another version of the same name
+    const dependentsByInstalled = new Map();
+    entries.forEach((entry) => {
+        entry.dependencies.forEach((specifier) => {
             var _a;
-            dependentsByName.set(dependency, ((_a = dependentsByName.get(dependency)) !== null && _a !== void 0 ? _a : new Set()).add(entry.name));
+            const dependencyName = getYarnSpecifierName(specifier);
+            const dependencyVersion = versionBySpecifier.get(specifier);
+            if (!dependencyName || !dependencyVersion)
+                return;
+            const installed = `${dependencyName}@${dependencyVersion}`;
+            dependentsByInstalled.set(installed, ((_a = dependentsByInstalled.get(installed)) !== null && _a !== void 0 ? _a : new Set()).add(entry.name));
         });
     });
     if (versionsByName.size === 0) {
@@ -1081,8 +1103,13 @@ const runYarnLockAudit = (rootPath, direct) => __awaiter(void 0, void 0, void 0,
             return;
         }
         const patchStatuses = yield Promise.all(advisories.map((advisory) => getPatchStatus(advisory, name, version)));
-        const isDevelopment = (_k = (_j = direct.dev.get(name)) === null || _j === void 0 ? void 0 : _j.has(version)) !== null && _k !== void 0 ? _k : false;
-        const [dependent] = [...((_l = dependentsByName.get(name)) !== null && _l !== void 0 ? _l : [])].sort();
+        const dependents = [
+            ...((_j = dependentsByInstalled.get(`${name}@${version}`)) !== null && _j !== void 0 ? _j : []),
+        ].sort();
+        const [dependent] = dependents;
+        // A direct devDependency is only "Dev" when nothing installed depends
+        // on it; any dependent means the version is also reachable transitively
+        const isDevelopment = ((_l = (_k = direct.dev.get(name)) === null || _k === void 0 ? void 0 : _k.has(version)) !== null && _l !== void 0 ? _l : false) && dependents.length === 0;
         let dependencyPath = `(transitive) > ${name}`;
         if (isDevelopment)
             dependencyPath = `(dev) > ${name}`;

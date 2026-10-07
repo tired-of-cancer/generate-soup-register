@@ -224,6 +224,8 @@ type TNpmBulkAdvisory = {
 type TYarnLockEntry = {
   name: string
   version: string
+  // Header specifiers, e.g. `semver@^7.3.7`; dependencies are specifiers too
+  specifiers: string[]
   dependencies: string[]
 }
 // Whether a fix exists for an advisory as it applies to an installed version
@@ -1098,6 +1100,9 @@ const checkGitHubRepoStatus = async (
 /**
  * Check if a version is affected by a GitHub advisory's vulnerable_version_range
  * GitHub format: ">= 5.16.0, <= 5.19.0" or "< 1.2.3" etc.
+ * Unparseable versions or ranges count as affected on purpose: a false
+ * positive shows up in the register for a human to judge, a false negative
+ * would hide a real finding.
  */
 const isVersionAffectedByAdvisory = (
   version: string,
@@ -1164,12 +1169,14 @@ const parseYarnLockEntries = (content: string): TYarnLockEntry[] => {
     if (!line.startsWith(' ')) {
       // Entry header, e.g. `"semver@^7.3.7", "semver@^7.3.8":` — every
       // specifier resolves to the same package, so the first one names it
-      const firstSpecifier = line
+      const specifiers = line
         .replace(/:\s*$/, '')
-        .split(', ')[0]
-        .replaceAll(/^"|"$/g, '')
-      const name = getYarnSpecifierName(firstSpecifier)
-      current = name ? { name, version: '', dependencies: [] } : undefined
+        .split(', ')
+        .map((specifier) => specifier.replaceAll(/^"|"$/g, ''))
+      const name = getYarnSpecifierName(specifiers[0])
+      current = name
+        ? { name, version: '', specifiers, dependencies: [] }
+        : undefined
       if (current) entries.push(current)
       inDependencyBlock = false
       return
@@ -1178,14 +1185,12 @@ const parseYarnLockEntries = (content: string): TYarnLockEntry[] => {
     if (!current) return
 
     if (line.startsWith('    ')) {
-      // Nested line of a dependency block, e.g. `    braces "^3.0.3"`
+      // Nested line of a dependency block, e.g. `    braces "^3.0.3"`,
+      // stored as the specifier `braces@^3.0.3` so it matches an entry header
       if (!inDependencyBlock) return
       const match = line.trim().match(/^"?([^\s"]+)"?\s+"?(.*?)"?$/)
       if (!match) return
-      const dependencyName = match[2].startsWith('npm:')
-        ? getYarnSpecifierName(match[2].slice(4)) ?? match[1]
-        : match[1]
-      current.dependencies.push(dependencyName)
+      current.dependencies.push(`${match[1]}@${match[2]}`)
       return
     }
 
@@ -1204,6 +1209,7 @@ const parseYarnLockEntries = (content: string): TYarnLockEntry[] => {
 
 const NPM_BULK_ADVISORY_URL =
   'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk'
+const ADVISORY_REQUEST_TIMEOUT_MS = 30_000
 
 /**
  * Fetch the advisories for every installed version in one request from the
@@ -1223,6 +1229,7 @@ const fetchNpmAdvisories = async (
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ADVISORY_REQUEST_TIMEOUT_MS),
     })
     if (!response.ok) {
       trackApiFailure(
@@ -1278,6 +1285,7 @@ const fetchGitHubAdvisory = async (
   try {
     const response = await octokit.request('GET /advisories/{ghsa_id}', {
       ghsa_id: ghsaId,
+      request: { signal: AbortSignal.timeout(ADVISORY_REQUEST_TIMEOUT_MS) },
     })
     return response.data as TGitHubAdvisory
   } catch (error) {
@@ -1369,9 +1377,13 @@ const getDirectDependencyVersions = (
   packageJSONs.forEach((packageJSON) => {
     Object.entries(packageJSON[kind] ?? {}).forEach(([name, specifier]) => {
       const version = resolveVersion(name, specifier, lockfileVersions)
+      // `alias: "npm:real@range"` installs `real`; findings carry that name
+      const installedName = specifier.startsWith('npm:')
+        ? getYarnSpecifierName(specifier.slice(4)) ?? name
+        : name
       versionsByName.set(
-        name,
-        (versionsByName.get(name) ?? new Set<string>()).add(version)
+        installedName,
+        (versionsByName.get(installedName) ?? new Set<string>()).add(version)
       )
     })
   })
@@ -1394,16 +1406,31 @@ const runYarnLockAudit = async (
   )
 
   const versionsByName = new Map<string, Set<string>>()
-  const dependentsByName = new Map<string, Set<string>>()
+  const versionBySpecifier = new Map<string, string>()
   entries.forEach((entry) => {
     versionsByName.set(
       entry.name,
       (versionsByName.get(entry.name) ?? new Set<string>()).add(entry.version)
     )
-    entry.dependencies.forEach((dependency) => {
-      dependentsByName.set(
-        dependency,
-        (dependentsByName.get(dependency) ?? new Set<string>()).add(entry.name)
+    entry.specifiers.forEach((specifier) => {
+      versionBySpecifier.set(specifier, entry.version)
+    })
+  })
+
+  // Dependents per installed version, so a finding is traced to a package
+  // that pulls in that exact version and not another version of the same name
+  const dependentsByInstalled = new Map<string, Set<string>>()
+  entries.forEach((entry) => {
+    entry.dependencies.forEach((specifier) => {
+      const dependencyName = getYarnSpecifierName(specifier)
+      const dependencyVersion = versionBySpecifier.get(specifier)
+      if (!dependencyName || !dependencyVersion) return
+      const installed = `${dependencyName}@${dependencyVersion}`
+      dependentsByInstalled.set(
+        installed,
+        (dependentsByInstalled.get(installed) ?? new Set<string>()).add(
+          entry.name
+        )
       )
     })
   })
@@ -1468,8 +1495,14 @@ const runYarnLockAudit = async (
       const patchStatuses = await Promise.all(
         advisories.map((advisory) => getPatchStatus(advisory, name, version))
       )
-      const isDevelopment = direct.dev.get(name)?.has(version) ?? false
-      const [dependent] = [...(dependentsByName.get(name) ?? [])].sort()
+      const dependents = [
+        ...(dependentsByInstalled.get(`${name}@${version}`) ?? []),
+      ].sort()
+      const [dependent] = dependents
+      // A direct devDependency is only "Dev" when nothing installed depends
+      // on it; any dependent means the version is also reachable transitively
+      const isDevelopment =
+        (direct.dev.get(name)?.has(version) ?? false) && dependents.length === 0
       let dependencyPath = `(transitive) > ${name}`
       if (isDevelopment) dependencyPath = `(dev) > ${name}`
       else if (dependent) dependencyPath = `${dependent} > ${name}`
