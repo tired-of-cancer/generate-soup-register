@@ -14,18 +14,18 @@ jobs:
     steps:
       - name: Draft a new release
         id: draft_release
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v6.4.0
         env:
           GITHUB_TOKEN: ${{ secrets.TOC_BOT_PAT }}
 
       - name: Check out Git repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           ref: ${{ github.head_ref }}
           token: ${{ secrets.TOC_BOT_PAT }}
 
       - name: Setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version-file: '.nvmrc'
           cache: yarn
@@ -41,7 +41,7 @@ jobs:
           git-tag-version: 'false'
 
       - name: Run linters
-        uses: wearerequired/lint-action@v2
+        uses: wearerequired/lint-action@v2.3.0
         with:
           auto_fix: true
           commit: false
@@ -50,7 +50,7 @@ jobs:
           github_token: ${{ secrets.TOC_BOT_PAT }}
 
       - name: Commit version number update if changed
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v5.2.0
         with:
           commit_message: Set version to match next release draft [skip actions]
           commit_author: ToCbot <info@untire.me>
